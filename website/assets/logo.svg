@@ -1,0 +1,26 @@
+<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="u1" x1="0" y1="0" x2="32" y2="32">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <linearGradient id="u2" x1="32" y1="0" x2="0" y2="32">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="1" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <!-- outer hex shield / shell -->
+  <path d="M16 2l12.5 7v14L16 30 3.5 23V9L16 2z" stroke="url(#u1)" stroke-width="1.4" fill="rgba(34,211,238,.06)"/>
+  <!-- inner accent ring -->
+  <path d="M16 5.2l9.2 5.2v10.2L16 25.8 6.8 20.6V10.4L16 5.2z" stroke="rgba(34,211,238,.2)" stroke-width=".6" fill="none"/>
+  <!-- claw blades forming an upward U -->
+  <path d="M10.2 8.5c-.4 5-.2 9.4 2.7 12.3 1.5 1.5 3.1 2 3.1 2s1.6-.5 3.1-2c2.9-2.9 3.1-7.3 2.7-12.3" stroke="url(#u2)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)"/>
+  <!-- AI node / eye -->
+  <circle cx="16" cy="14.5" r="2.6" fill="url(#u1)"/>
+  <!-- circuit traces -->
+  <path d="M16 17.3v2.5M12.5 14.5H9.8M22.2 14.5h-2.7M13.6 18.5l-1.6 1.6M18.4 18.5l1.6 1.6" stroke="#22d3ee" stroke-width=".8" stroke-linecap="round" filter="url(#glow)"/>
+</svg>
