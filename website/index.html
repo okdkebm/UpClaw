@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UpClaw — AI 驱动的渗透测试 CLI 工具 | 授权安全测试自动化</title>
+<meta name="description" content="UpClaw 是 AI 驱动的渗透测试 CLI 工具：自然语言下达目标，自动完成 Reason→Explore→Fact→Reflect→Report 全流程，证据级反幻觉。提供个人、专业、企业三种商业授权，仅用于已授权的安全测试。" />
+<meta name="keywords" content="UpClaw,渗透测试,AI渗透,安全测试自动化,红队工具,漏洞评估,授权渗透,CLI安全工具" />
+<meta name="author" content="懰襬" />
+<meta name="robots" content="index,follow" />
+<meta name="theme-color" content="#0a0e16" />
+<link rel="canonical" href="https://upclaw.example.com/" />
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="assets/favicon.svg" />
+
+<!-- Open Graph / 社交分享 -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="UpClaw" />
+<meta property="og:title" content="UpClaw — AI 驱动的渗透测试 CLI 工具" />
+<meta property="og:description" content="自然语言下达目标，自动完成授权渗透全流程。证据级反幻觉，目标达成即收敛。" />
+<meta property="og:url" content="https://upclaw.example.com/" />
+<meta property="og:image" content="assets/logo.svg" />
+<meta property="og:locale" content="zh_CN" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="UpClaw — AI 驱动的渗透测试 CLI 工具" />
+<meta name="twitter:description" content="自然语言下达目标，自动完成授权渗透全流程。" />
+
+<link rel="stylesheet" href="assets/css/style.css" />
+
+<!-- 结构化数据：软件 + 商业产品 -->
+<script type="application/ld+json">
+{
+  "@context":"https://schema.org",
+  "@type":"SoftwareApplication",
+  "name":"UpClaw",
+  "applicationCategory":"SecurityApplication",
+  "operatingSystem":"Linux, macOS, Windows",
+  "description":"AI 驱动的渗透测试 CLI 工具，自动化 Reason→Explore→Fact→Reflect→Report 全流程，仅用于已授权的安全测试。",
+  "author":{"@type":"Person","name":"懰襬"},
+  "offers":[
+    {"@type":"Offer","name":"个人版","price":"0","priceCurrency":"CNY","description":"个人学习与非商业用途免费"},
+    {"@type":"Offer","name":"专业版","price":"299","priceCurrency":"CNY","description":"单人商业授权，含商业使用许可"},
+    {"@type":"Offer","name":"企业版","price":"1999","priceCurrency":"CNY","description":"团队/企业级授权，含 SLA 与专属支持"}
+  ]
+}
+</script>
+</head>
+<body>
+  <div id="cursorLight"></div>
+
+<div class="sysbar">
+  <div class="wrap">
+    <span class="dot">●</span>
+    <span>UpClaw v1.0.0</span><span class="sep">//</span>
+    <span>AI-Powered Pentest</span><span class="sep">//</span>
+    <span>个人版免费</span><span class="sep">//</span>
+    <span>商业授权</span><span class="sep">//</span>
+    <span>Python 3.10+</span><span class="sep">//</span>
+    <span>LLM Agent</span><span class="sep">//</span>
+    <span>MCP Protocol</span><span class="sep">//</span>
+    <span>23 Pentest Skills</span><span class="sep">//</span>
+    <span>Goal-Driven Solver</span><span class="sep">//</span>
+    <span>Evidence-Level</span><span class="sep">//</span>
+    <span>Authorized Use Only</span>
+  </div>
+</div>
+
+<nav>
+  <div class="wrap">
+    <a href="#top" class="logo">
+      <img src="assets/logo.svg" alt="UpClaw" />
+      UpClaw
+    </a>
+    <div class="navlinks">
+      <a href="#features">特性</a><a href="#quickstart">快速开始</a>
+      <a href="#flow">工作流</a><a href="#matrix">能力矩阵</a>
+      <a href="pricing.html">定价</a><a href="docs.html">文档</a><a href="about.html">关于</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" title="切换明暗主题">🌙</button>
+    <a class="btn" href="pricing.html">商业授权</a>
+    <a class="btn btn-primary" href="#quickstart">免费开始</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="badge"><span class="pulse"></span> SYSTEM ONLINE · EVIDENCE FIRST</div>
+      <h1>说人话，<br/><span class="grad">打漏洞。</span></h1>
+      <p class="lede">AI 驱动的渗透测试 CLI 工具 —— 用<b>自然语言</b>输入目标，自动完成 <b>Reason→Explore→Fact→Reflect→Report</b> 全流程渗透，证据级反幻觉，目标达成即收敛。</p>
+      <div class="flow-tags">
+        <span class="on">01 Reason</span><span class="on">02 Explore</span><span class="on">03 Fact</span><span class="on">04 Reflect</span>
+        <span>05 Report</span><span>23 PENTEST SKILLS</span><span>MCP TOOLCHAIN</span><span>L0–L4 ESCALATION</span><span>EVIDENCE-LEVEL</span>
+      </div>
+      <div class="hero-actions">
+        <a class="btn btn-primary btn-lg" href="#quickstart">免费开始使用</a>
+        <a class="btn btn-lg" href="pricing.html">查看商业授权</a>
+      </div>
+      <div class="trust-row">
+        <span>个人版免费</span><span>商业授权合规</span><span>7 天无理由退款</span><span>支持开票</span>
+      </div>
+    </div>
+    <div>
+      <div class="term">
+        <div class="term-bar"><span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span><span class="ttitle">upclaw — zsh</span></div>
+        <div class="term-body" id="heroTerm"></div>
+      </div>
+
+    </div>
+  </div>
+</header>
+
+<section id="demo">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// DEMO</div><h2>实战演示</h2>
+      <p>一条命令，从目标到证据链。下面是一段真实风格的渗透会话回放。</p>
+    </div>
+    <div class="term reveal" style="max-width:880px;margin:0 auto">
+      <div class="term-bar"><span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span><span class="ttitle">upclaw run — session.log</span></div>
+      <div class="term-body">
+        <div><span class="prompt">$</span> <span class="cmd">upclaw "对 demo.vulnlab.htb 做授权渗透"</span></div>
+        <div class="dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</div>
+        <div><span class="step">[Reason]</span> <span class="dim">生成攻击面假设：Web 服务 / 子域 / 已知 CVE</span></div>
+        <div><span class="step">[Explore]</span> <span class="dim">nmap -sV → 开放 80/443；调用 ctf-web skill</span></div>
+        <div><span class="step">[Fact]</span> <span class="dim">在工具原始输出中核对：找到 /admin 未授权访问</span></div>
+        <div><span class="step">[Reflect]</span> <span class="dim">L1 升级：尝试鉴权绕过 payload</span></div>
+        <div><span class="step">[Report]</span> <span class="ok">输出结构化报告 + PoC 脚本 + 风险评级</span></div>
+        <div class="ok" style="margin-top:6px">✓ 收敛：2 高危 / 1 中危，证据链完整</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// CORE FEATURES</div><h2>核心特性</h2>
+      <p>开箱即用，让每一次渗透都有章可循。</p>
+    </div>
+    <div class="feat-grid">
+      <div class="card reveal"><div class="num">01</div><h3>目标驱动求解引擎</h3><p>摒弃固定轮数，以 Fact/Intent 黑板图驱动 OODA 循环，目标达成即收敛。</p><ul><li>Fact/Intent 黑板图搜索</li><li>证据级反幻觉闸门</li><li>结构上杜绝原地打转</li></ul></div>
+      <div class="card reveal"><div class="num">02</div><h3>证据级反幻觉</h3><p>所有结论必须在真实工具输出中逐字符出现，拒绝 AI 凭空编造。</p><ul><li>flag 逐字符验证</li><li>完成判定否定闸门</li><li>即时收敛不空跑</li></ul></div>
+      <div class="card reveal"><div class="num">03</div><h3>MCP 工具链 + 信息收集</h3><p>4 个 MCP 服务 + 6 个原生信息收集工具，覆盖全场景。</p><ul><li>fetch/memory 本地开箱即用</li><li>Chrome DevTools / Burp 外部对接</li><li>目录枚举 / 空间测绘 / 子域名</li></ul></div>
+      <div class="card reveal"><div class="num">04</div><h3>23 个渗透 Skill</h3><p>7 核心 + 16 专项 Skill，含 180+ 参考文档。</p><ul><li>pentest-flow 全流程编排</li><li>ctf-web / crypto / misc</li><li>osint-recon / cve-triage</li></ul></div>
+      <div class="card reveal"><div class="num">05</div><h3>结构化推理 + 自适应反思</h3><p>已知事实 / 约束 / 攻击链结构化沉淀，失败按 L0–L4 渐进升级。</p><ul><li>推理状态层 + 反思引擎</li><li>L0–L4 payload 升级</li><li>跨周期失败记忆</li></ul></div>
+      <div class="card reveal"><div class="num">06</div><h3>多模式运行</h3><p>CLI/REPL + TUI 工作台 + Web UI + Docker，全场景覆盖。</p><ul><li>upclaw tui 终端图形化</li><li>upclaw web 浏览器操作</li><li>Docker 一键部署</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// QUICK START</div><h2>快速开始</h2>
+      <p>四步安装，立即发起你的第一次 AI 渗透。</p>
+    </div>
+    <div class="qs-grid">
+      <div class="step-list reveal">
+        <div class="step"><div class="n"></div><div class="body"><b>安装</b><span>使用 pip 安装 UpClaw CLI。</span></div></div>
+        <div class="step"><div class="n"></div><div class="body"><b>配置 Key</b><span>写入你的 LLM API Key。</span></div></div>
+        <div class="step"><div class="n"></div><div class="body"><b>启动</b><span>进入交互式 REPL。</span></div></div>
+        <div class="step"><div class="n"></div><div class="body"><b>渗透</b><span>用自然语言描述目标即可。</span></div></div>
+      </div>
+      <div class="code-block reveal">
+        <button class="copy-btn" data-copy>复制</button>
+        <pre><span class="ckey">$</span> pip install upclaw
+<span class="ckey">$</span> upclaw config set llm.api_key <span class="cstr">sk-xxx</span>
+<span class="ckey">$</span> upclaw
+🦞 对 target.com 进行渗透测试</pre>
+      </div>
+    </div>
+    <div class="code-block reveal" style="margin-top:22px">
+      <button class="copy-btn" data-copy>复制</button>
+      <pre><span class="dim"># 完整工作流（以 MiniMax 为例）</span>
+<span class="ckey">$</span> upclaw config set llm.base_url <span class="cstr">https://api.minimaxi.com/v1</span>
+<span class="ckey">$</span> upclaw config set llm.model <span class="cstr">MiniMax-M3</span>
+<span class="ckey">$</span> upclaw config set llm.api_key <span class="cstr">sk-your-key-here</span>
+<span class="ckey">$</span> upclaw doctor   <span class="dim"># 检查环境</span></pre>
+    </div>
+    <div class="code-block reveal" style="margin-top:22px">
+      <button class="copy-btn" data-copy>复制</button>
+      <pre><span class="dim"># Docker 一键部署</span>
+<span class="ckey">$</span> cp .env.example .env   <span class="dim"># 填入 API Key</span>
+<span class="ckey">$</span> docker compose up --build
+<span class="dim"># 打开 http://127.0.0.1:7788</span></pre>
+    </div>
+  </div>
+</section>
+
+<section id="flow">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// WORKFLOW</div><h2>自主渗透工作流</h2>
+      <p>目标驱动 OODA 循环 · Fact/Intent 黑板图 · 证据级反幻觉。</p>
+    </div>
+    <div class="flow">
+      <div class="card reveal"><div class="tag">REASON</div><h3>分析</h3><p>分析全图，提出探索方向，Intent 驱动。</p></div>
+      <div class="card reveal"><div class="tag">EXPLORE</div><h3>探索</h3><p>领取 Intent，工具执行，调用 Skill / MCP。</p></div>
+      <div class="card reveal"><div class="tag">FACT</div><h3>事实</h3><p>证据验证，写回事实，黑板图更新。</p></div>
+      <div class="card reveal"><div class="tag">REFLECT</div><h3>反思</h3><p>失败归类，L0–L4 升级，跨周期记忆。</p></div>
+      <div class="card reveal"><div class="tag">REPORT</div><h3>报告</h3><p>结构化报告生成，修复建议与风险评级。</p></div>
+      <div class="card reveal"><div class="tag">POC</div><h3>验证</h3><p>Python 验证脚本，可复现漏洞验证。</p></div>
+    </div>
+    <div class="flow-note reveal">循环收敛条件：<b>目标达成 / 证据齐备</b> 即停止，不空跑。</div>
+  </div>
+</section>
+
+<!-- 渗透能力矩阵：源自 Awesome-Hacking -->
+<section id="matrix">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// CAPABILITY MATRIX</div><h2>渗透能力矩阵</h2>
+      <p>内置方向整理自社区精选清单 <b>Awesome-Hacking</b>，覆盖从侦察到利用的完整链路。</p>
+    </div>
+    <div class="matrix">
+      <div class="grp reveal"><h4><span class="ic"></span>Web 应用 & API</h4><div class="items">
+        <span><b>Web Hacking</b> Web 安全</span><span><b>Web3 Security</b> 链上安全</span><span><b>API Security</b> 接口核查</span>
+        <span><b>PayloadsAllTheThings</b> 载荷库</span><span><b>OWASP</b> 速查表</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>资产发现 & 侦察</h4><div class="items">
+        <span><b>Asset Discovery</b> 资产测绘</span><span><b>OSINT</b> 开源情报</span><span><b>SecLists</b> 字典集</span>
+        <span><b>Probable Wordlists</b> 概率词表</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>移动 / IoT / 工控</h4><div class="items">
+        <span><b>Android Security</b></span><span><b>iOS / OSX</b></span><span><b>IoT & Hardware</b></span>
+        <span><b>Embedded IoT</b></span><span><b>Vehicle Security</b> 车联网</span><span><b>Drone Hacking</b></span>
+        <span><b>Cellular</b> 3G/4G/5G</span><span><b>RFSec-ToolKit</b> 射频</span><span><b>ICS</b> 工控</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>云原生 & CI/CD</h4><div class="items">
+        <span><b>CI/CD Attacks</b> 流水线攻击</span><span><b>DevSecOps</b></span><span><b>Container</b> 容器逃逸</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>红队 & 社工</h4><div class="items">
+        <span><b>Red Teaming</b> 红队工具</span><span><b>Social Engineering</b> 社工</span><span><b>Red Team Physical</b> 物理渗透</span>
+        <span><b>Mainframe</b> 大型机</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>逆向 / 模糊 / 利用</h4><div class="items">
+        <span><b>Reversing</b> 逆向</span><span><b>Fuzzing</b> 模糊测试</span><span><b>Payloads</b></span>
+        <span><b>CVE PoC</b> 漏洞验证</span><span><b>GTFOBins</b> 提权</span><span><b>Linux Kernel Exp</b></span>
+        <span><b>Executable Packing</b></span><span><b>Shell</b> 命令行框架</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>密码 & 字典</h4><div class="items">
+        <span><b>Password Cracking</b> 密码破解</span><span><b>Probable Wordlists</b></span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>靶场 & 学习环境</h4><div class="items">
+        <span><b>Vulhub</b> 漏洞环境</span><span><b>Capsulecorp Pentest</b> 网络靶场</span><span><b>Cyber Skills</b> 合规训练</span>
+        <span><b>Detection Lab</b></span><span><b>Art of Hacking</b></span><span><b>Pentest Wiki</b></span><span><b>Hacking</b> 教程集</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>情报 & 响应</h4><div class="items">
+        <span><b>Threat Intelligence</b></span><span><b>IOC Collection</b></span><span><b>ThreatHunter</b></span>
+        <span><b>Incident Response</b></span><span><b>Forensics</b> 取证</span><span><b>APT Notes</b></span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>CTF & 赏金</h4><div class="items">
+        <span><b>CTF</b> 竞赛框架</span><span><b>Hacker101</b> Web 安全课</span><span><b>Bug Bounty</b> 赏金计划</span>
+        <span><b>Bug Bounty Ref</b> 案例库</span></div></div>
+      <div class="grp reveal"><h4><span class="ic"></span>通用工具体系</h4><div class="items">
+        <span><b>CyberChef</b> 数据编解码</span><span><b>Pcaptools</b> 流量处理</span><span><b>Suricata</b> 入侵检测</span>
+        <span><b>Tor</b> 匿名通信</span><span><b>Static Analysis</b></span><span><b>Malware Analysis</b></span><span><b>YARA</b></span></div></div>
+    </div>
+    <div class="matrix-note reveal">能力矩阵内容整理自 <a href="https://github.com/Hack-with-Github/Awesome-Hacking" target="_blank" rel="noopener">Hack-with-Github/Awesome-Hacking</a> 社区清单，仅作方向索引，工具本身需自行获取与合规使用。</div>
+  </div>
+</section>
+
+<section id="ecosystem">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// ECOSYSTEM</div><h2>技术生态</h2>
+      <p>兼容所有 OpenAI 协议模型，自由切换 LLM Provider。</p>
+    </div>
+    <div class="eco-tags reveal">
+      <span>OpenAI</span><span>Anthropic</span><span>MiniMax</span><span>DeepSeek</span><span>智谱 GLM</span>
+      <span>Moonshot</span><span>通义千问</span><span>SiliconFlow</span><span>豆包</span><span>百川</span>
+      <span>阶跃星辰</span><span>商汤</span><span>零一万物</span><span>自定义</span>
+    </div>
+  </div>
+</section>
+
+<section id="cta">
+  <div class="wrap">
+    <div class="cta reveal">
+      <h2>选择适合你的授权方式</h2>
+      <p>个人学习免费；企业与商业场景需购买商业授权，含发票、技术支持与服务等级保障。</p>
+      <div class="btns">
+        <a class="btn btn-primary btn-lg" href="pricing.html">查看定价与授权</a>
+        <a class="btn btn-lg" href="#quickstart">📦 免费版安装</a>
+        <a class="btn btn-lg" href="about.html#contact">🤝 商务合作咨询</a>
+      </div>
+      <div class="trust-badges">
+        <span><b>✓</b> 7 天无理由退款</span><span><b>✓</b> 正规发票</span><span><b>✓</b> 授权合规</span><span><b>✓</b> 数据不出本地</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="stats">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// STATISTICS</div><h2>实时统计</h2>
+      <p>能力持续扩展中，欢迎共建。</p>
+    </div>
+    <div class="stats">
+      <div class="stat reveal"><div class="big" data-count="40" data-suffix="+">0</div><div class="lbl">渗透方向</div></div>
+      <div class="stat reveal"><div class="big" data-count="23">0</div><div class="lbl">Pentest Skills</div></div>
+      <div class="stat reveal"><div class="big" data-count="180" data-suffix="+">0</div><div class="lbl">参考文档</div></div>
+      <div class="stat reveal"><div class="big" data-count="14">0</div><div class="lbl">兼容模型</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="community">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-num">// COMMUNITY</div><h2>加入社区</h2>
+      <p>与开发者和其他安全研究员一起交流、共建。</p>
+    </div>
+    <div class="community reveal">
+      <div><img class="qr" src="assets/qq-qr.png" alt="UpClaw QQ群 917335721" /></div>
+      <div class="info">
+        <p>🦞 作者：<b>懰襬</b></p>
+        <p>💬 QQ 官方交流群：<b>917335721</b></p>
+        <p>📜 许可方式：个人版免费使用 · 商业用途需<a href="pricing.html" class="accent">购买商业授权</a></p>
+        <p style="margin-top:16px"><a class="btn" href="about.html#contact">商务合作咨询</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a href="#top" class="logo" style="margin-bottom:12px">
+          <img src="assets/logo.svg" alt="UpClaw" style="width:26px;height:26px" />UpClaw
+        </a>
+        <p style="color:var(--muted);font-size:14px;max-width:360px">AI 驱动的渗透测试 CLI 工具。说人话，打漏洞。让每一次渗透都有章可循。</p>
+      </div>
+      <div>
+        <h5>产品</h5>
+        <a href="#features">核心特性</a><a href="#quickstart">快速开始</a><a href="#flow">工作流</a><a href="#matrix">能力矩阵</a><a href="#ecosystem">技术生态</a>
+      </div>
+      <div>
+        <h5>商业</h5>
+        <a href="pricing.html">定价与授权</a><a href="pricing.html#faq">购买常见问题</a><a href="about.html#contact">商务合作</a><a href="docs.html">产品文档</a><a href="about.html">关于我们</a>
+      </div>
+      <div>
+        <h5>法律与支持</h5>
+        <a href="legal.html">服务条款</a><a href="legal.html#aup">可接受使用政策</a><a href="legal.html#privacy">隐私政策</a><a href="legal.html#refund">退款政策</a><a href="legal.html#license">许可协议</a>
+      </div>
+    </div>
+    <div class="trust-badges">
+      <span><b>✓</b> 仅授权测试</span><span><b>✓</b> 数据本地处理</span><span><b>✓</b> 商业授权合规</span><span><b>✓</b> 7 天无理由退款</span><span><b>✓</b> 发票可开</span>
+    </div>
+    <div class="disclaimer">
+      <b>⚠️ 安全与法律声明：</b>UpClaw 仅用于已获得明确书面授权的安全测试、CTF 竞赛、安全教学和红队演练。使用本工具前，请确保已获得目标系统所有者的授权。任何未经授权的渗透、入侵或破坏行为均违反《网络安全法》《刑法》相关规定，后果由使用者自行承担。购买即表示您已阅读并同意<a href="legal.html#aup" style="color:var(--accent)">《可接受使用政策》</a>。
+    </div>
+    <div class="copyright">© 2026 UpClaw · 作者 懰襬 · 保留所有权利 · 本站内容与设计为原创，禁止未授权复制与二次分发。</div>
+  </div>
+</footer>
+
+<script src="assets/js/main.js" defer></script>
+</body>
+</html>

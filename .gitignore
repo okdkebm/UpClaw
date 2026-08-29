@@ -11,9 +11,9 @@ env/
 
 # Reports (generated scan outputs)
 reports/
-*.html
-*.json
-*.xml
+reports/*.html
+reports/*.json
+reports/*.xml
 
 # Environment
 .env

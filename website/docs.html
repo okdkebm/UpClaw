@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>产品文档 — UpClaw 安装、配置与使用指南</title>
+<meta name="description" content="UpClaw 官方文档：安装部署、模型配置、命令用法、自主渗透工作流、MCP 工具链与常见问题排查。仅用于已授权的安全测试。" />
+<meta name="robots" content="index,follow" />
+<meta name="theme-color" content="#0a0e16" />
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+<link rel="canonical" href="https://upclaw.example.com/docs.html" />
+<link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+  <div id="cursorLight"></div>
+
+<div class="sysbar">
+  <div class="wrap">
+    <span class="dot">●</span>
+    <span>UpClaw v1.0.0</span><span class="sep">//</span>
+    <span>Docs</span><span class="sep">//</span>
+    <span>Python 3.10+</span><span class="sep">//</span>
+    <span>Authorized Use Only</span>
+  </div>
+</div>
+
+<nav>
+  <div class="wrap">
+    <a href="index.html" class="logo">
+      <img src="assets/logo.svg" alt="UpClaw" />
+      UpClaw
+    </a>
+    <div class="navlinks">
+      <a href="index.html#features">特性</a><a href="index.html#quickstart">快速开始</a>
+      <a href="pricing.html">定价</a><a href="docs.html">文档</a><a href="about.html">关于</a>
+      <a href="legal.html">法律条款</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" title="切换明暗主题">🌙</button>
+    <a class="btn btn-primary" href="pricing.html">查看定价</a>
+  </div>
+</nav>
+
+<section class="page-head">
+  <div class="wrap">
+    <div class="breadcrumb"><a href="index.html">首页</a><span>/</span>产品文档</div>
+    <h1>UpClaw <span class="accent">产品文档</span></h1>
+    <p>从零开始安装、配置模型、下达目标到输出报告。文档持续更新，遇到问题可加入官方 QQ 群（917335721）交流。</p>
+  </div>
+</section>
+
+<section style="padding-top:0">
+  <div class="wrap">
+    <div class="doc-layout">
+
+      <!-- 侧边目录 -->
+      <aside class="doc-nav">
+        <h5>// CONTENTS</h5>
+        <a href="#install">1. 安装部署</a>
+        <a href="#config">2. 模型配置</a>
+        <a href="#usage">3. 基本用法</a>
+        <a href="#workflow">4. 自主渗透工作流</a>
+        <a href="#mcp">5. MCP 工具链</a>
+        <a href="#output">6. 报告与证据</a>
+        <a href="#license-key">7. 激活授权</a>
+        <a href="#faq">8. 常见问题</a>
+      </aside>
+
+      <!-- 正文 -->
+      <div class="doc-body">
+
+        <div class="note danger">
+          <b>使用前提：</b>请仅在<b>已获得明确书面授权</b>的目标上使用 UpClaw。未授权测试违反<a href="legal.html#aup" class="accent">《可接受使用政策》</a>，并可能触犯法律。
+        </div>
+
+        <h2 id="install">1. 安装部署</h2>
+        <h3>环境要求</h3>
+        <ul>
+          <li>Python <b>3.10</b> 或更高版本</li>
+          <li>操作系统：Linux（推荐）、macOS、Windows（WSL2 推荐）</li>
+          <li>可选：Kali Linux / Parrot OS 等渗透测试发行版，可直接使用内置工具链</li>
+          <li>内存：≥ 4 GB；如需本地模型推理则建议 ≥ 16 GB</li>
+        </ul>
+
+        <h3>使用 pip 安装</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre><span class="ckey">pip</span> install upclaw
+
+<span class="ckey"># 验证安装</span>
+upclaw --version
+<span class="ckey"># 输出：upclaw 1.0.0</span></pre>
+        </div>
+
+        <h3>从源码安装（开发版）</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre>git clone &lt;你的仓库地址&gt; upclaw
+cd upclaw
+pip install -e .</pre>
+        </div>
+
+        <h2 id="config">2. 模型配置</h2>
+        <p>UpClaw 本身不提供大模型，需要你接入自己的模型服务。首次运行会引导生成配置文件 <code>~/.upclaw/config.yaml</code>。</p>
+
+        <h3>交互式配置</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre>upclaw init</pre>
+        </div>
+
+        <h3>手动配置示例</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre><span class="ckey">provider</span>: openai-compatible
+<span class="ckey">base_url</span>: <span class="cstr">"https://your-endpoint/v1"</span>
+<span class="ckey">api_key</span>: <span class="cstr">"sk-xxxxxxxx"</span>
+<span class="ckey">model</span>: <span class="cstr">"your-model-name"</span>
+<span class="ckey">temperature</span>: 0.2
+<span class="ckey">max_tokens</span>: 8192
+
+<span class="ckey"># 代理（可选）</span>
+<span class="ckey">proxy</span>: <span class="cstr">"http://127.0.0.1:7890"</span></pre>
+        </div>
+
+        <div class="note">
+          <b>隐私提示：</b>AI 推理会将你<b>主动提交</b>的内容发送给所选模型服务商。处理敏感数据时请优先脱敏，企业版可使用私有化部署 + 内网模型，实现完全离线。详见<a href="legal.html#privacy" class="accent">《隐私政策》</a>。
+        </div>
+
+        <h2 id="usage">3. 基本用法</h2>
+
+        <h3>下达自然语言目标</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre>upclaw <span class="cstr">"对 https://target.example.com 发起授权渗透，重点检查认证与上传功能"</span></pre>
+        </div>
+
+        <h3>指定范围与限制</h3>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre><span class="ckey"># 限制最大步数与时间预算</span>
+upclaw <span class="cstr">"评估 192.168.1.0/24 的 Web 服务"</span> --max-steps 30 --timeout 20m
+
+<span class="ckey"># 只读模式：仅信息收集，不做利用验证</span>
+upclaw <span class="cstr">"信息收集 target.example.com"</span> --mode recon
+
+<span class="ckey"># 指定启用哪些技能</span>
+upclaw <span class="cstr">"检查 SQL 注入"</span> --skills sqli,xss,idor</pre>
+        </div>
+
+        <h3>常用参数</h3>
+        <div class="compare">
+          <table>
+            <thead><tr><th>参数</th><th>说明</th><th>示例</th></tr></thead>
+            <tbody>
+              <tr><td><code>--max-steps</code></td><td>最大推理/执行步数</td><td><code>--max-steps 30</code></td></tr>
+              <tr><td><code>--timeout</code></td><td>任务总超时</td><td><code>--timeout 20m</code></td></tr>
+              <tr><td><code>--mode</code></td><td>recon（侦察）/ full（全流程）</td><td><code>--mode recon</code></td></tr>
+              <tr><td><code>--skills</code></td><td>限定启用的渗透技能</td><td><code>--skills sqli</code></td></tr>
+              <tr><td><code>--output</code></td><td>报告输出目录</td><td><code>--output ./reports</code></td></tr>
+              <tr><td><code>--format</code></td><td>报告格式：md / html / json</td><td><code>--format html</code></td></tr>
+              <tr><td><code>--verbose</code></td><td>输出详细推理过程</td><td><code>--verbose</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="workflow">4. 自主渗透工作流</h2>
+        <p>UpClaw 采用 <b>Reason → Explore → Fact → Reflect → Report</b> 五阶段闭环，每一阶段都要求产出可验证的证据，避免大模型"幻觉式"报漏洞。</p>
+        <ul>
+          <li><b>Reason（推理）</b>：基于目标信息生成攻击面假设，并排出优先级。</li>
+          <li><b>Explore（探索）</b>：调用工具链（nmap、指纹识别、目录爆破、POC 验证等）执行假设。</li>
+          <li><b>Fact（取证）</b>：对每一步结果做事实核对，只保留有实证输出（响应报文、回显、截图）的发现。</li>
+          <li><b>Reflect（反思）</b>：评估当前进展，判断是否需要调整假设、升级手法或收敛。</li>
+          <li><b>Report（报告）</b>：汇总证据链，输出可直接交付的漏洞报告。</li>
+        </ul>
+        <div class="note">
+          <b>证据级反幻觉：</b>任何未被实证支持的"疑似漏洞"都会被标记为 <code>UNVERIFIED</code>，不会进入最终报告正文。这一点对交付给客户的商业报告尤为重要。
+        </div>
+
+        <h2 id="mcp">5. MCP 工具链</h2>
+        <p>UpClaw 通过 MCP（Model Context Protocol）接入外部安全工具，工具可插拔。已内置的典型能力包括：</p>
+        <ul>
+          <li><b>信息收集</b>：端口扫描、服务指纹、子域名与资产发现、目录枚举</li>
+          <li><b>Web 应用</b>：SQL 注入、XSS、SSRF、IDOR、文件上传、反序列化等检测</li>
+          <li><b>认证与会话</b>：弱口令、JWT 缺陷、会话固定、越权测试</li>
+          <li><b>主机与内网</b>：本地信息收集、权限配置核查、横向移动路径分析</li>
+          <li><b>报告</b>：证据归档、漏洞定级（CVSS）、修复建议生成</li>
+        </ul>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre><span class="ckey"># 查看已加载的 MCP 工具</span>
+upclaw tools list
+
+<span class="ckey"># 单独调用某个工具</span>
+upclaw tools run nmap --target 192.168.1.10</pre>
+        </div>
+
+        <h2 id="output">6. 报告与证据</h2>
+        <p>任务结束后，UpClaw 会在输出目录生成结构化结果：</p>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre>reports/
+├── report.html          <span class="ckey"># 可视化报告（可交付客户）</span>
+├── report.md            <span class="ckey"># Markdown 报告</span>
+├── findings.json        <span class="ckey"># 结构化漏洞数据</span>
+└── evidence/            <span class="ckey"># 原始证据（请求/响应、截图）</span>
+    ├── finding-01/
+    └── finding-02/</pre>
+        </div>
+        <div class="note">
+          <b>商业交付：</b>专业版与企业版可<b>去除 UpClaw 品牌标识</b>，输出白标报告直接交付给你的客户。个人版报告带有产品水印。
+        </div>
+
+        <h2 id="license-key">7. 激活商业授权</h2>
+        <p>购买专业版或企业版后，你会收到授权凭证（License Key），激活方式：</p>
+        <div class="code-block">
+          <button class="copy-btn">复制</button>
+<pre>upclaw activate &lt;YOUR-LICENSE-KEY&gt;
+
+<span class="ckey"># 查看授权状态</span>
+upclaw license info</pre>
+        </div>
+        <ul>
+          <li>一个席位对应一台设备；更换设备前请先执行 <code>upclaw license release</code> 释放。</li>
+          <li>企业版请联系管理员在团队后台分配席位。</li>
+          <li>授权校验仅在激活与定期校验时联网，不影响离线使用。</li>
+        </ul>
+
+        <h2 id="faq">8. 常见问题</h2>
+
+        <h3>提示模型调用失败 / 连接超时？</h3>
+        <p>请检查 <code>base_url</code>、<code>api_key</code> 是否正确，以及是否需要配置代理（<code>proxy</code>）。可用 <code>upclaw doctor</code> 一键自检网络与配置。</p>
+
+        <h3>扫描速度很慢？</h3>
+        <p>默认策略偏保守以避免对目标造成影响。可通过 <code>--max-steps</code> 限制步数、<code>--timeout</code> 设置预算，或用 <code>--skills</code> 聚焦特定漏洞类型。</p>
+
+        <h3>报告里为什么没有我预期中的漏洞？</h3>
+        <p>UpClaw 只输出<b>有实证证据</b>的发现，未经验证的会归入"待人工复核"。这可能是目标确实不存在该漏洞，也可能是需要人工介入构造更复杂的利用链。建议结合手动测试交叉验证。</p>
+
+        <h3>可以离线使用吗？</h3>
+        <p>企业版支持私有化部署与内网离线运行（配合本地模型）。在线模式下的 AI 推理需要访问模型服务。</p>
+
+        <h3>遇到 Bug 或想提需求？</h3>
+        <p>欢迎加入官方 QQ 群 <b>917335721</b> 反馈，或通过<a href="about.html#contact" class="accent">联系页面</a>提交。企业版用户享专属技术支持通道。</p>
+
+        <div class="note warn" style="margin-top:28px">
+          <b>免责声明：</b>UpClaw 不保证发现目标系统的全部漏洞，扫描结果需经人工复核。请始终在授权范围内使用。详见<a href="legal.html#terms" class="accent">《服务条款》</a>。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-grid">
+      <div>
+        <a href="index.html" class="logo" style="margin-bottom:12px">
+          <img src="assets/logo.svg" alt="UpClaw" style="width:26px;height:26px" />UpClaw
+        </a>
+        <p style="color:var(--muted);font-size:14px;max-width:360px">AI 驱动的渗透测试 CLI 工具。说人话，打漏洞。让每一次渗透都有章可循。</p>
+      </div>
+      <div>
+        <h5>产品</h5>
+        <a href="index.html#features">核心特性</a><a href="index.html#quickstart">快速开始</a><a href="index.html#flow">工作流</a><a href="index.html#matrix">能力矩阵</a>
+      </div>
+      <div>
+        <h5>商业</h5>
+        <a href="pricing.html">定价与授权</a><a href="pricing.html#faq">购买常见问题</a><a href="about.html#contact">商务合作</a><a href="legal.html">法律条款</a>
+      </div>
+      <div>
+        <h5>法律条款</h5>
+        <a href="legal.html#terms">服务条款</a><a href="legal.html#aup">可接受使用政策</a><a href="legal.html#privacy">隐私政策</a><a href="legal.html#refund">退款政策</a>
+      </div>
+    </div>
+    <div class="disclaimer">
+      <b>⚠️ 安全与法律声明：</b>UpClaw 仅用于已获得明确书面授权的安全测试、CTF 竞赛、安全教学和红队演练。任何未经授权的渗透行为均属违法，后果由使用者自行承担。
+    </div>
+    <div class="copyright">© 2026 UpClaw · 作者 懰襬 · 保留所有权利 · 本站内容与设计为原创，禁止未授权复制与二次分发。</div>
+  </div>
+</footer>
+
+<script src="assets/js/main.js" defer></script>
+</body>
+</html>
