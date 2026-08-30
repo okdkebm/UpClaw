@@ -15,7 +15,7 @@
 - **零第三方依赖**：仅使用 Python 标准库，开箱即用
 - **证据级反幻觉**：每个发现都有原始请求/响应证据支撑
 - **目标驱动收敛**：达成目标自动停止，不浪费资源
-- **23 项渗透技能**：覆盖信息收集、漏洞验证、暴力破解、Web 安全等
+- **23 项渗透技能**：信息收集 6 + 漏洞验证 8 + 暴力破解 3 + Web 安全 6（详见下方能力矩阵）
 - **HTML 报告**：自动生成结构化渗透测试报告
 
 ## 快速开始
@@ -58,13 +58,12 @@ User Input → Reason → Explore → Fact → Reflect → Report → Done
 
 ## 能力矩阵
 
-| 类别 | 技能 |
+| 类别 | 技能（模块名） |
 |------|------|
-| 信息收集 | DNS 枚举、子域名扫描、端口扫描、WAF 检测、指纹识别 |
-| 漏洞验证 | SQL 注入、XSS、命令注入、SSRF、XXE、文件包含、路径遍历 |
-| 暴力破解 | 目录爆破、备份文件扫描、参数模糊测试 |
-| Web 安全 | CORS 检查、HTTPS 检查、Cookie 安全、CSP 评估 |
-| 高级利用 | 原型污染、CRLF 注入、Open Redirect、WebDav 测试 |
+| 信息收集（6） | 指纹识别、端口扫描、DNS 枚举（dns）、子域名扫描（subdomain）、WAF 检测（waf）、TLS/HTTPS 检查（tls） |
+| 漏洞验证（8） | SQL 注入（sqli）、XSS（xss）、命令注入（cmdi）、SSRF（ssrf）、XXE（xxe）、本地文件包含/路径遍历（lfi）、开放重定向（open-redirect）、CRLF 注入（crlf） |
+| 暴力破解（3） | 目录爆破（dir）、备份文件扫描（backup）、参数模糊测试（fuzz） |
+| Web 安全（6） | CORS 配置（cors）、Cookie 安全（cookie）、HTTP 方法（methods）、WebDAV（webdav）、安全响应头（headers）、敏感路径（sensitive） |
 
 ## 许可
 
