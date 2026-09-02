@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __author__ = "懰襬"
 
 """通用工具：HTTP 请求、目标解析、并发执行。仅使用标准库。"""
@@ -2653,8 +2653,554 @@ AVAILABLE = {
     "xss": _run_xss,
 }
 
-# 默认启用的全部检测模块（cmd_scan 默认值）
+# 默认启用的全部检测模块（cmd_scan 默认值；外部工具不在此列，
+# 由扫描的外部工具阶段自动检测并启用）
 DEFAULT_CHECKS = ",".join(AVAILABLE)
+
+
+# === UPCLAW-V0.3-EXT-TOOLS ===
+# 外部工具适配层：自动检测本机已安装的安全工具，把它们的扫描结果
+# 归一化为 UpClaw Finding（证据优先、拒绝幻觉），统一进入报告。
+# - 未安装的工具自动跳过，不影响零依赖 / 无 GUI 场景；
+# - 各外部工具按其自身许可独立分发，UpClaw 仅做驱动与结果归一化；
+# - GUI/API 类工具（Burp/AppScan/Yakit/ARL/BeEF 等）多数无 CLI 入口，
+#   只做检测并提示，由 tools / doctor 展示。
+
+
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+
+
+# ---- 通用辅助 ----
+
+_SEV_MAP = {
+    "critical": "CRITICAL",
+    "high": "HIGH",
+    "medium": "MEDIUM",
+    "moderate": "MEDIUM",
+    "low": "LOW",
+    "info": "INFO",
+    "informational": "INFO",
+}
+
+
+def _norm_sev(s: str, default: str = "INFO") -> str:
+    k = (s or "").strip().lower()
+    return _SEV_MAP.get(k, default)
+
+
+def _bin_path(*names: str) -> str | None:
+    """返回 PATH 中首个存在的二进制绝对路径，否则 None。"""
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    return None
+
+
+def _find_wordlist(cfg: dict[str, Any]) -> str | None:
+    """定位目录爆破字典：优先用户配置，其次常见系统路径。"""
+    u = cfg.get("wordlist")
+    if u and os.path.isfile(str(u)):
+        return str(u)
+    for c in (
+        "/usr/share/wordlists/dirb/common.txt",
+        "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt",
+        "/usr/share/dirb/wordlists/common.txt",
+        "/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt",
+        "/opt/wordlists/common.txt",
+        os.path.expanduser("~/wordlists/common.txt"),
+    ):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _run_bin(binary: str, argv: list[str], timeout: float = 120) -> str | None:
+    """以列表参数执行外部二进制（禁 shell）。成功返回 stdout+stderr，
+    二进制缺失 / 超时 / 异常返回 None。"""
+    try:
+        cp = subprocess.run(
+            [binary, *argv], capture_output=True, text=True,
+            errors="replace", timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    out = cp.stdout or ""
+    err = cp.stderr or ""
+    return out if out else err
+
+
+def _add_finding(store: FindingStore, tool: str, title: str, sev: str,
+                 status: str, url: str, location: str, description: str,
+                 evidence: str, references: list[str] | None = None,
+                 request: str = "") -> None:
+    store.add(
+        title=title, severity=sev, status=status, category=tool,
+        target=url, location=location, description=description,
+        evidence=(evidence or "")[:1500], references=references or [],
+        request=request or f"{tool} -> {url}",
+    )
+
+
+# ---- 各外部工具适配器（签名统一为 (store, url, cfg)）----
+# 返回值约定：None=未安装/不可用，False=条件不满足跳过，True=已执行。
+
+def _ext_run_nuclei(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("nuclei")
+    if not binary:
+        return None
+    out = _run_bin(binary, ["-u", url, "-jsonl", "-silent"],
+                   timeout=float(cfg.get("ext_nuclei_timeout", 240)))
+    if not out:
+        return True
+    seen = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        info = item.get("info") or {}
+        name = info.get("name") or "Nuclei 匹配"
+        sev = _norm_sev(str(info.get("severity", "")), "INFO")
+        matched = item.get("matched-at") or item.get("host") or url
+        refs = info.get("reference")
+        if isinstance(refs, str):
+            refs = [refs]
+        if not isinstance(refs, list):
+            refs = []
+        _add_finding(
+            store, "nuclei",
+            f"Nuclei: {name}",
+            sev, "VERIFIED", url, str(matched),
+            f"Nuclei 模板 {info.get('template-id') or '-'} 命中即确认真实存在。",
+            f"matched-at={matched}" + (f"; matcher-name={item.get('matcher-name')}" if item.get("matcher-name") else ""),
+            refs,
+        )
+        seen += 1
+        if seen >= 50:
+            break
+    return True
+
+
+def _ext_run_nmap(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("nmap")
+    if not binary:
+        return None
+    host, _, _, _ = parse_target(url)
+    ports = cfg.get("ext_nmap_ports")
+    argv = ["-sT", "-sV", "--version-light", "-Pn", "-T4"]
+    if ports:
+        argv += ["-p", str(ports)]
+    else:
+        argv += ["--top-ports", "100"]
+    argv += ["-oX", "-", host]
+    out = _run_bin(binary, argv, timeout=float(cfg.get("ext_nmap_timeout", 300)))
+    if not out:
+        return True
+    try:
+        root = ET.fromstring(out)
+    except ET.ParseError:
+        return True
+    n = 0
+    for h in root.iter("host"):
+        addr = ""
+        for a in h.iter("address"):
+            if a.get("addrtype") == "ipv4":
+                addr = a.get("addr", "")
+                break
+        for p in h.iter("port"):
+            state = None
+            for s in p.iter("state"):
+                state = s.get("state")
+                break
+            if state != "open":
+                continue
+            pid = p.get("portid", "")
+            proto = p.get("protocol", "tcp")
+            svc = ""
+            prod = ver = ""
+            for s in p.iter("service"):
+                svc = s.get("name", "")
+                prod = s.get("product", "")
+                ver = s.get("version", "")
+                break
+            detail = " ".join(x for x in (prod, ver) if x)
+            _add_finding(
+                store, "nmap",
+                f"Nmap: {pid}/{proto} 端口开放", "INFO", "VERIFIED", url,
+                f"{addr}:{pid}",
+                f"Nmap 确认 {addr} 的 {pid}/{proto} 端口开放（service={svc}）。",
+                f"port={pid}/{proto} service={svc}" + (f" ({detail})" if detail else ""),
+            )
+            n += 1
+            if n >= 60:
+                return True
+    return True
+
+
+def _ext_run_sqlmap(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    if "?" not in url:
+        return False  # 需要带查询参数的 URL
+    binary = _bin_path("sqlmap")
+    if not binary:
+        return None
+    tmp = tempfile.mkdtemp(prefix="upclaw-sqlmap-")
+    out = _run_bin(
+        binary,
+        ["-u", url, "--batch", "--level", "1", "--risk", "1", "--smart",
+         "--flush-session", "--output-dir", tmp, "--disable-coloring"],
+        timeout=float(cfg.get("ext_sqlmap_timeout", 300)),
+    )
+    if not out:
+        return True
+    hits = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        low = line.strip()
+        if not low:
+            continue
+        if ("appears to be injectable" in low or "is vulnerable" in low
+                or "injection point" in low):
+            key = low[:120]
+            if key not in seen:
+                seen.add(key)
+                hits.append(low.strip())
+    union = "UNION query SQL injection" in out
+    if hits or "identified the following injection point" in out:
+        _add_finding(
+            store, "sqlmap",
+            "SQLMap: 检测到 SQL 注入点",
+            "HIGH" if union else "MEDIUM", "VERIFIED", url, url,
+            "sqlmap 经真实请求验证存在可注入参数。",
+            " | ".join(hits[:3]) if hits else out.splitlines()[0].strip()[:500],
+        )
+    return True
+
+
+def _ext_run_nikto(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("nikto", "nikto.pl")
+    if not binary:
+        return None
+    argv = ["-h", url, "-Format", "txt", "-nointeractive",
+            "-maxtime", str(int(cfg.get("ext_nikto_maxtime", 120)))]
+    out = _run_bin(binary, argv, timeout=float(cfg.get("ext_nikto_timeout", 200)))
+    if not out:
+        return True
+    noise_keys = ("Server:", "Target IP:", "Start time:", "End time:",
+                  "Scanning ", "Host ", "Site ", "Completed", "1 host")
+    n = 0
+    for line in out.splitlines():
+        s = line.strip()
+        if not s.startswith("+"):
+            continue
+        body = s[1:].strip()
+        if not body or body.startswith(noise_keys):
+            continue
+        sev = "MEDIUM" if "OSVDB" in body else "LOW"
+        _add_finding(
+            store, "nikto",
+            f"Nikto: {body.split(' (')[0][:80]}",
+            sev, "UNVERIFIED", url, url,
+            "Nikto 启发式发现，需人工复核（未纳入交付结论）。",
+            body[:500],
+        )
+        n += 1
+        if n >= 30:
+            break
+    return True
+
+
+def _ext_run_ffuf(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("ffuf")
+    if not binary:
+        return None
+    wordlist = _find_wordlist(cfg)
+    if not wordlist:
+        print("    [i] ffuf 已安装但未找到字典（config wordlist 或常见系统路径），跳过")
+        return True
+    base = url.rstrip("/") + "/"
+    fd, out_json = tempfile.mkstemp(prefix="upclaw-ffuf-", suffix=".json")
+    os.close(fd)
+    try:
+        _run_bin(
+            binary,
+            ["-u", base + "FUZZ", "-w", wordlist, "-ac", "-t", "20",
+             "-timeout", "8", "-mc", "200,204,301,302,307,401,403,500",
+             "-of", "json", "-o", out_json],
+            timeout=float(cfg.get("ext_ffuf_timeout", 180)),
+        )
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            return True
+        results = payload.get("results") if isinstance(payload, dict) else payload
+        if not isinstance(results, list):
+            return True
+        n = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            ru = str(r.get("url", ""))
+            st = int(r.get("status", 0) or 0)
+            sev = "LOW" if st in (200, 401, 403, 500) else "INFO"
+            _add_finding(
+                store, "ffuf",
+                f"FFuf: {ru.rsplit('/', 1)[-1] or ru}", sev, "UNVERIFIED", url, ru,
+                "ffuf 自动校准后的大小差异发现（启发式，需人工复核）。",
+                f"status={st} length={r.get('length')} words={r.get('words')}",
+            )
+            n += 1
+            if n >= 40:
+                break
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
+def _ext_run_dirsearch(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("dirsearch", "dirsearch.py")
+    if not binary:
+        return None
+    fd, out_json = tempfile.mkstemp(prefix="upclaw-ds-", suffix=".json")
+    os.close(fd)
+    try:
+        args = ["-u", url, "-o", out_json, "-t", "30"]
+        if binary.endswith(".py"):
+            args = ["-u", url, "-o", out_json, "-t", "30"]
+            out = _run_bin("python", [binary, *args], timeout=float(cfg.get("ext_dirsearch_timeout", 180)))
+        else:
+            out = _run_bin(binary, args, timeout=float(cfg.get("ext_dirsearch_timeout", 180)))
+        if not out and not os.path.isfile(out_json):
+            return True
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return True
+        results = data.get("results") if isinstance(data, dict) else data
+        if not isinstance(results, list):
+            return True
+        n = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            path = str(r.get("path", ""))
+            st = int(r.get("status", 0) or 0)
+            sev = "LOW" if st in (200, 401, 403, 500) else "INFO"
+            _add_finding(
+                store, "dirsearch",
+                f"Dirsearch: {path.rsplit('/', 1)[-1] or path}", sev, "UNVERIFIED", url,
+                url.rstrip("/") + path,
+                "dirsearch 状态码发现（启发式，需人工复核）。",
+                f"status={st} length={r.get('content-length') or r.get('content_length')}",
+            )
+            n += 1
+            if n >= 40:
+                break
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
+def _ext_run_subfinder(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("subfinder")
+    if not binary:
+        return None
+    host, _, _, _ = parse_target(url)
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        return False  # IP 目标无子域
+    out = _run_bin(binary, ["-d", host, "-silent"], timeout=float(cfg.get("ext_subfinder_timeout", 120)))
+    if not out:
+        return True
+    subs = [s.strip() for s in out.splitlines() if s.strip() and "." in s]
+    if not subs:
+        return True
+    _add_finding(
+        store, "subfinder",
+        f"Subfinder: 发现 {len(subs)} 个子域名", "INFO", "VERIFIED", url, host,
+        "通过被动源枚举发现的子域名（资产面扩大）。",
+        ", ".join(subs[:60]),
+    )
+    return True
+
+
+def _ext_run_httpx(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    binary = _bin_path("httpx")
+    if not binary:
+        return None
+    out = _run_bin(binary, ["-u", url, "-json", "-silent", "-timeout", "8"],
+                   timeout=float(cfg.get("ext_httpx_timeout", 90)))
+    if not out:
+        return True
+    n = 0
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        lu = str(item.get("url") or item.get("input") or url)
+        title = item.get("title")
+        tech = item.get("tech") or item.get("webserver") or item.get("server")
+        bits = [f"status={item.get('status_code')}"]
+        if title:
+            bits.append(f"title={title}")
+        if tech:
+            t = tech if isinstance(tech, str) else ",".join(tech[:8] if isinstance(tech, list) else [])
+            bits.append(f"tech={t}")
+        _add_finding(
+            store, "httpx",
+            f"HTTPX: {lu.rstrip('/').rsplit('/', 1)[-1] or lu} 存活", "INFO", "VERIFIED", url, lu,
+            "httpx 探测确认目标存活并返回有效响应。",
+            " ".join(bits),
+        )
+        n += 1
+        if n >= 5:
+            break
+    return True
+
+
+def _ext_run_zap(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """OWASP ZAP：优先 zap-baseline.py（需 ZAP 已安装且可脚本化），
+    仅 zap-cli 时提示人工方式，无入口则跳过。"""
+    base = _bin_path("zap-baseline.py")
+    if not base:
+        zap_cli = _bin_path("zap-cli")
+        if not zap_cli:
+            return None
+        print("    [i] 检测到 zap-cli：需人工启动 ZAP 守护进程后使用（q 查看 tools 说明），跳过自动扫描")
+        return True
+    fd, out_json = tempfile.mkstemp(prefix="upclaw-zap-", suffix=".json")
+    os.close(fd)
+    try:
+        _run_bin("python", [base, "-t", url, "-J", out_json, "-l", "MEDIUM"],
+                 timeout=float(cfg.get("ext_zap_timeout", 600)))
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return True
+        alerts = data.get("alerts") if isinstance(data, dict) else None
+        if not isinstance(alerts, list):
+            return True
+        n = 0
+        for a in alerts:
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("alert") or "ZAP 告警")
+            risk = str(a.get("risk") or "Low")
+            _add_finding(
+                store, "zap",
+                f"ZAP: {name}", _norm_sev(risk, "LOW"), "VERIFIED", url,
+                str(a.get("url") or url),
+                "ZAP 主动扫描确认（基线脚本产出）。",
+                (str(a.get("evidence") or a.get("description") or ""))[:400],
+            )
+            n += 1
+            if n >= 40:
+                break
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
+# 可自动执行的外部工具（顺序即扫描阶段的执行顺序）
+EXT_TOOL_RUN: dict[str, Callable[[FindingStore, str, dict[str, Any]], bool | None]] = {
+    "subfinder": _ext_run_subfinder,
+    "httpx": _ext_run_httpx,
+    "nmap": _ext_run_nmap,
+    "nuclei": _ext_run_nuclei,
+    "sqlmap": _ext_run_sqlmap,
+    "nikto": _ext_run_nikto,
+    "ffuf": _ext_run_ffuf,
+    "dirsearch": _ext_run_dirsearch,
+    "zap": _ext_run_zap,
+}
+
+# 检测展示用元数据（含无 CLI 的 GUI/API 类工具）
+EXT_TOOL_LIST: list[dict[str, Any]] = [
+    {"name": "nuclei", "display": "Nuclei", "category": "漏洞扫描·模板化", "binaries": ["nuclei"]},
+    {"name": "nmap", "display": "Nmap", "category": "端口/服务识别", "binaries": ["nmap"]},
+    {"name": "sqlmap", "display": "SQLMap", "category": "SQL 注入验证", "binaries": ["sqlmap"]},
+    {"name": "nikto", "display": "Nikto", "category": "Web 启发式扫描", "binaries": ["nikto", "nikto.pl"]},
+    {"name": "ffuf", "display": "FFuf", "category": "目录/参数爆破", "binaries": ["ffuf"]},
+    {"name": "dirsearch", "display": "Dirsearch", "category": "目录枚举", "binaries": ["dirsearch", "dirsearch.py"]},
+    {"name": "subfinder", "display": "Subfinder", "category": "子域名枚举", "binaries": ["subfinder"]},
+    {"name": "httpx", "display": "HTTPX", "category": "存活/技术栈探测", "binaries": ["httpx"]},
+    {"name": "zap", "display": "OWASP ZAP", "category": "Web 主动扫描", "binaries": ["zap-baseline.py", "zap-cli", "zap"]},
+    {"name": "yakit", "display": "Yakit(API)", "category": "一体化平台", "binaries": ["yakit", "yak"], "manual": True},
+    {"name": "beef", "display": "BeEF", "category": "浏览器利用", "binaries": ["beef-xss", "beef"], "manual": True},
+    {"name": "burpsuite", "display": "Burp Suite(API)", "category": "专业代理扫描", "binaries": ["BurpSuitePro", "burpsuite"], "manual": True},
+    {"name": "appscan", "display": "AppScan(CLI)", "category": "企业级扫描", "binaries": ["appscan"], "manual": True},
+    {"name": "arl", "display": "ARL 灯塔", "category": "资产侦察(Web)", "binaries": [], "manual": True},
+]
+
+
+def ext_tool_status() -> dict[str, dict[str, Any]]:
+    """返回 {name: {installed, path, manual, display, category}} 检测结果。"""
+    out: dict[str, dict[str, Any]] = {}
+    for spec in EXT_TOOL_LIST:
+        n = spec["name"]
+        if spec.get("manual") and not spec.get("binaries"):
+            out[n] = {**spec, "installed": False, "path": ""}
+            continue
+        p = _bin_path(*spec["binaries"])
+        out[n] = {**spec, "installed": bool(p), "path": p or ""}
+    return out
+
+
+def run_external_phase(store: FindingStore, url: str, cfg: dict[str, Any], args: argparse.Namespace) -> int:
+    """执行外部工具阶段。返回实际执行成功的工具数。"""
+    restrict = getattr(args, "ext_tools", None)
+    allow = {x.strip().lower() for x in restrict.split(",") if x.strip()} if restrict else None
+    ran = 0
+    skipped = []
+    print("[*] 外置工具适配（可选，--no-ext 关闭）...")
+    for name, fn in EXT_TOOL_RUN.items():
+        if allow is not None and name not in allow:
+            continue
+        try:
+            r = fn(store, url, cfg)
+        except Exception as e:  # noqa: BLE001 适配器异常不影响主流程
+            print(f"    [!] {name} 执行异常: {e}")
+            continue
+        if r is None:
+            skipped.append(name)
+        elif r is False:
+            print(f"    [i] {name} 条件不满足，跳过")
+        else:
+            ran += 1
+            if getattr(args, "verbose", False):
+                print(f"    · {name} 完成")
+    if skipped:
+        print(f"    [i] 未安装的外部工具: {', '.join(skipped)}（可先安装后再扫描）")
+    if not ran and not skipped:
+        print("    [i] 未检测到已安装的外部工具")
+    return ran
+
+
+# 将可自动执行的外部工具注册进模块注册表（支持 -c nuclei 等单独调用；
+# 默认扫描的 --checks 不包含它们，由外部工具阶段自动启用）
+for _ext_name, _ext_fn in EXT_TOOL_RUN.items():
+    AVAILABLE[_ext_name] = _ext_fn
+del _ext_name, _ext_fn
 
 
 
@@ -2680,7 +3226,7 @@ def build_meta(target: str, started: float, cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "tool": "UpClaw",
-        "version": "0.1.0",
+        "version": "0.3.0",
         "target": target,
         "started_at": datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -3127,6 +3673,10 @@ def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         if args.verbose:
             print(f"    · {name} 完成")
 
+    # ---- 外部工具适配（v0.3，自动检测本机已装工具）----
+    if not getattr(args, "no_ext", False):
+        run_external_phase(store, url, cfg, args)
+
     # ---- 输出 ----
     meta = build_meta(url, started, cfg)
     out_dir = args.output or str(cfg.get("output_dir", "reports"))
@@ -3217,12 +3767,48 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         print(f"\n  模型服务    : 已配置 ({cfg.get('base_url')})")
     else:
         print("\n  模型服务    : 未配置（AI 推理功能不可用，扫描功能不受影响）")
+
+    # 外部工具
+    status = ext_tool_status()
+    installed = [i for i in status.values() if i["installed"]]
+    print(f"\n  外部工具    : {len(installed)}/{len(status)} 已检测到")
+    for info in status.values():
+        if info["installed"]:
+            mark = "·" if not info.get("manual") else "·(需人工/API)"
+            print(f"    [{mark}] {info['display']:<14} {info['path']}")
+    if not installed:
+        print("    提示: 安装 nuclei/nmap/sqlmap 等工具后，扫描将自动调用（见 `upclaw tools`）")
     print()
     return 0
 
 
 def cmd_version(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     print(f"upclaw {__version__}")
+    return 0
+
+
+def cmd_tools(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    """列出外部工具检测状态。"""
+    print("\nUpClaw 外部工具检测\n")
+    status = ext_tool_status()
+    print(f"  {'工具':<16}{'类别':<18}{'状态':<12}路径")
+    print(f"  {'-'*16}{'-'*18}{'-'*12}{'-'*40}")
+    for name, info in status.items():
+        if info.get("manual"):
+            st = "自动扫描不可用" if not info["installed"] else "已安装·需人工/API"
+        else:
+            st = "已安装" if info["installed"] else "未安装"
+        disp = info["display"]
+        cat = info["category"]
+        path = info["path"] if info["installed"] else "-"
+        print(f"  {disp:<16}{cat:<18}{st:<12}{path[:40]}")
+    print("\n说明:")
+    print("  · 可自动执行的工具（nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/zap）")
+    print("    在 scan 时被自动调用，结果统一进入 UpClaw 报告；")
+    print("    可用 --no-ext 关闭，--ext-tools nuclei,sqlmap 只启用指定工具。")
+    print("  · Yakit/BeEF/Burp Suite/AppScan/ARL 为 GUI/API 类工具，请按其文档人工驱动。")
+    print("  · ffuf 需字典：config set wordlist <路径> 或放置到常见路径。")
+    print()
     return 0
 
 
@@ -3252,7 +3838,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="完整扫描（信息收集 + 安全检测）")
     s.add_argument("target", help="目标，如 example.com 或 https://x.com/p?id=1")
     add_common(s)
-    s.add_argument("--checks", help=f"启用模块，逗号分隔，默认全部（dns,subdomain,waf,tls,cmdi,ssrf,xxe,lfi,open-redirect,crlf,dir,backup,fuzz,cors,cookie,methods,webdav,headers,sensitive,sqli,xss）")
+    s.add_argument("--checks", help="启用模块，逗号分隔，默认全部内置模块（dns,subdomain,waf,tls,cmdi,ssrf,xxe,lfi,open-redirect,crlf,dir,backup,fuzz,cors,cookie,methods,webdav,headers,sensitive,sqli,xss；外部工具: nuclei,nmap,sqlmap,nikto,ffuf,dirsearch,subfinder,httpx,zap）")
+    s.add_argument("--no-ext", action="store_true",
+                   help="关闭外部工具适配阶段（默认自动调用已安装的外部工具）")
+    s.add_argument("--ext-tools", help="仅启用指定外部工具，逗号分隔，如 nuclei,sqlmap")
     s.add_argument("--ports", help="端口列表，如 80,443 或 1-1000")
     s.add_argument("--skip-ports", action="store_true", help="跳过端口扫描")
     s.add_argument("--port-timeout", type=float, default=1.5, help="端口连接超时")
@@ -3285,6 +3874,9 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="环境与网络自检")
     d.add_argument("target", nargs="?", help="连通性测试目标")
     d.set_defaults(func=cmd_doctor)
+
+    t = sub.add_parser("tools", help="列出外部工具检测状态")
+    t.set_defaults(func=cmd_tools)
 
     v = sub.add_parser("version", help="显示版本")
     v.set_defaults(func=cmd_version)
