@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "懰襬"
 
 """通用工具：HTTP 请求、目标解析、并发执行。仅使用标准库。"""
@@ -3226,7 +3226,7 @@ def build_meta(target: str, started: float, cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "tool": "UpClaw",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "target": target,
         "started_at": datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -3587,6 +3587,176 @@ def _parse_ports(s: str | None) -> list[int] | None:
 
 # ---------------------------------------------------------------- 子命令
 
+# ================================================================
+# === UPCLAW-V0.4-MANUAL-TOOLS ===
+# 手动测试三件套（Burp Repeater / Decoder / Comparer 的 CLI 等价物）：
+#   upclaw req   —— 手动改包重放单请求（等价 Repeater）
+#   upclaw codec —— 编解码（等价 Decoder）
+#   upclaw cmp   —— 双请求响应对比（等价 Comparer）
+# 仅标准库，零第三方依赖；复用顶部 http_request 引擎。
+# ================================================================
+
+import base64
+import binascii
+import difflib
+
+
+def _manual_render_request(method: str, url: str, headers: dict[str, str], body: str | None) -> str:
+    """还原将要发送的原始请求文本（供 --raw 回显与报告取证）。"""
+    p = urllib.parse.urlparse(url if "://" in url else "https://" + url)
+    host = p.netloc
+    path = p.path or "/"
+    if p.query:
+        path += "?" + p.query
+    lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
+    for k, v in headers.items():
+        lines.append(f"{k}: {v}")
+    lines.append("")
+    if body:
+        lines.append(body)
+    return "\r\n".join(lines)
+
+
+def cmd_req(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    """Repeater 等价物：手动构造并重放单个 HTTP(S) 请求，展示完整往返与证据片段。"""
+    url = args.target
+    method = (args.method or "GET").upper()
+    headers = {"User-Agent": str(cfg.get("user_agent", "UpClaw/0.1.0"))}
+    for h in args.header or []:
+        if ":" in h:
+            k, _, v = h.partition(":")
+            headers[k.strip()] = v.strip()
+        else:
+            print(f"[!] 忽略非法头: {h}（应为 'Name: value'）")
+            return 2
+
+    timeout = args.timeout or float(cfg.get("timeout", 6.0))
+    print(f"[*] {method} {url}")
+    if args.raw:
+        print("----- 请求 -----")
+        print(_manual_render_request(method, url, headers, args.data))
+
+    r = http_request(
+        url, method=method, headers=headers, body=args.data,
+        timeout=timeout, follow_redirects=not args.no_redirects,
+        verify_tls=bool(cfg.get("verify_tls", False)),
+        user_agent=headers.get("User-Agent", ""),
+    )
+    if r.error:
+        print(f"[✗] {r.error}")
+        return 1
+
+    print(f"[✓] HTTP {r.status} {r.reason}  ({round(r.elapsed, 2)}s)")
+    for k, v in r.headers.items():
+        print(f"    {k}: {v}")
+
+    # 匹配检测：-m 关键词命中则高亮（用于确认漏洞触发，如 SQL 报错特征）
+    if args.match:
+        for m in args.match:
+            hit = m.lower() in r.body.lower()
+            mark = "命中" if hit else "未命中"
+            print(f"    [{'!' if hit else 'i'}] 匹配 '{m}': {mark}")
+
+    body_out = r.body if args.full_body else r.body[: args.body_limit]
+    print("----- 响应体 -----")
+    print(body_out)
+    if not args.full_body and len(r.body) > args.body_limit:
+        print(f"... [响应体已截断，共 {len(r.body)} 字符，用 --full-body 查看全部]")
+    return 0
+
+
+def cmd_codec(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    """Decoder 等价物：url/base64/hex/html 编解码。数据缺省时从 stdin 读取（支持管道）。"""
+    action = args.action
+    kind = args.type
+    data = args.data
+    if data is None:
+        data = sys.stdin.read().rstrip("\n")
+    if data is None or data == "":
+        print("[!] 未提供数据（可用位置参数或管道输入）")
+        return 2
+
+    try:
+        if action == "encode":
+            if kind == "url":
+                out = urllib.parse.quote(data, safe="")
+            elif kind == "base64":
+                out = base64.b64encode(data.encode("utf-8")).decode("ascii")
+            elif kind == "hex":
+                out = data.encode("utf-8").hex()
+            elif kind == "html":
+                out = html.escape(data)
+            else:
+                raise SystemExit(f"[!] 不支持的编码类型: {kind}（url/base64/hex/html）")
+        else:  # decode
+            if kind == "url":
+                out = urllib.parse.unquote(data)
+            elif kind == "base64":
+                out = base64.b64decode(data).decode("utf-8", errors="replace")
+            elif kind == "hex":
+                out = binascii.unhexlify(data).decode("utf-8", errors="replace")
+            elif kind == "html":
+                out = html.unescape(data)
+            else:
+                raise SystemExit(f"[!] 不支持的编码类型: {kind}（url/base64/hex/html）")
+    except (binascii.Error, ValueError) as e:
+        print(f"[✗] 解码失败（数据格式非法）: {e}")
+        return 1
+
+    print(out)
+    return 0
+
+
+def cmd_cmp(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    """Comparer 等价物：对同一目标的两次变体请求做响应对比，辅助判断注入/越权是否生效。"""
+    ra = http_request(args.target_a, timeout=args.timeout or float(cfg.get("timeout", 6.0)),
+                      verify_tls=bool(cfg.get("verify_tls", False)))
+    rb = http_request(args.target_b, timeout=args.timeout or float(cfg.get("timeout", 6.0)),
+                      verify_tls=bool(cfg.get("verify_tls", False)))
+    if not ra.ok or not rb.ok:
+        print(f"[✗] 请求失败 A: {ra.error or ra.status} / B: {rb.error or rb.status}")
+        return 1
+
+    print(f"  A {args.target_a}")
+    print(f"    HTTP {ra.status} · 长度 {len(ra.body)} · {round(ra.elapsed, 2)}s")
+    print(f"  B {args.target_b}")
+    print(f"    HTTP {rb.status} · 长度 {len(rb.body)} · {round(rb.elapsed, 2)}s")
+
+    # 头部差异
+    ha, hb = {k.lower(): v for k, v in ra.headers.items()}, {k.lower(): v for k, v in rb.headers.items()}
+    diff_h = [f"  - {k}: {v}" for k, v in ha.items() if ha.get(k) != hb.get(k)]
+    diff_h += [f"  + {k}: {v}" for k, v in hb.items() if k not in ha or ha.get(k) != v]
+    if diff_h:
+        print("  [头差异]")
+        for line in diff_h[:10]:
+            print(line)
+    else:
+        print("  [头差异] 无")
+
+    # 正文差异（统一 diff 前 N 行）
+    la = ra.body.splitlines()
+    lb = rb.body.splitlines()
+    if la == lb:
+        print(f"  [正文差异] 无（两响应完全一致）")
+        return 0
+    ratio = difflib.SequenceMatcher(None, la, lb).ratio()
+    print(f"  [正文差异] 相似度 {round(ratio * 100, 1)}%")
+    diff = list(difflib.unified_diff(la, lb, "resp-A", "resp-B", lineterm="", n=1))
+    shown = 0
+    for line in diff:
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if shown >= args.diff_lines:
+            print(f"  ... 差异行超过 {args.diff_lines} 行，已截断")
+            break
+        if line.startswith("-"):
+            print(f"  {line}")
+        elif line.startswith("+"):
+            print(f"  {line}")
+        shown += 1
+    return 0
+
+
 def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     started = time.time()
     raw_targets = [t.strip() for t in args.target.split(",") if t.strip()]
@@ -3877,6 +4047,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     t = sub.add_parser("tools", help="列出外部工具检测状态")
     t.set_defaults(func=cmd_tools)
+
+    # req —— Burp Repeater 等价物
+    rq = sub.add_parser("req", help="手动改包重放单请求（Repeater）")
+    rq.add_argument("target", help="目标 URL，如 http://192.168.1.10/dvwa/vulnerabilities/sqli/?id=1")
+    rq.add_argument("-X", "--method", help="HTTP 方法，默认 GET")
+    rq.add_argument("-H", "--header", action="append", help="请求头，可多次，如 'Cookie: a=b; security=low'")
+    rq.add_argument("-d", "--data", help="请求体（POST data）")
+    rq.add_argument("-m", "--match", action="append", help="响应体匹配关键词，可多次（用于确认漏洞触发）")
+    rq.add_argument("--body-limit", type=int, default=2000, help="响应体显示上限，默认 2000")
+    rq.add_argument("--full-body", action="store_true", help="显示完整响应体")
+    rq.add_argument("--no-redirects", action="store_true", help="不跟随重定向")
+    rq.add_argument("--raw", action="store_true", help="回显将要发送的原始请求")
+    rq.add_argument("--timeout", type=float, default=None, help="HTTP 超时（秒）")
+    rq.set_defaults(func=cmd_req)
+
+    # codec —— Burp Decoder 等价物
+    cd = sub.add_parser("codec", help="编解码（Decoder）：url/base64/hex/html")
+    cd.add_argument("action", choices=["encode", "decode"], help="encode 编码 / decode 解码")
+    cd.add_argument("type", choices=["url", "base64", "hex", "html"], help="编解码类型")
+    cd.add_argument("data", nargs="?", help="数据（缺省时从 stdin 读取，支持管道）")
+    cd.set_defaults(func=cmd_codec)
+
+    # cmp —— Burp Comparer 等价物
+    cp = sub.add_parser("cmp", help="双请求响应对比（Comparer）")
+    cp.add_argument("target_a", help="基准 URL")
+    cp.add_argument("target_b", help="变体 URL（注入/越权 payload 后的请求）")
+    cp.add_argument("--diff-lines", type=int, default=20, help="正文差异显示行数，默认 20")
+    cp.add_argument("--timeout", type=float, default=None, help="HTTP 超时（秒）")
+    cp.set_defaults(func=cmd_cmp)
 
     v = sub.add_parser("version", help="显示版本")
     v.set_defaults(func=cmd_version)
