@@ -1,16 +1,54 @@
-# 安全策略
+# Security Policy
 
-## 报告安全漏洞
+## Reporting a vulnerability
 
-UpClaw 是一款渗透测试工具，但我们自身也重视代码安全。
-如果你发现 UpClaw 代码中的安全漏洞，请通过以下方式负责任地披露：
+UpClaw is an offensive-security tool — but the tool itself must be safe too.
+If you find a security issue in the UpClaw codebase, **please disclose it
+responsibly**:
 
-1. **不要**在公开的 Issue 中披露漏洞细节
-2. 发送邮件至项目作者，或通过 QQ 群 917335721 联系管理员
-3. 我们将在确认后尽快修复并发布更新
+1. **Do NOT** open a public Issue describing the vulnerability.
+2. Report privately via **GitHub Security Advisory**
+   (repo page → *Security* → *Report a vulnerability*) — preferred.
+3. Or email the maintainer / reach admins in the QQ group `917335721`.
 
-## 授权使用提醒
+Include, if possible:
+- Affected version(s) and the file/line if known
+- A minimal reproduction (target can be any authorized/local lab)
+- Suggested fix, if you have one
 
-UpClaw **仅可用于已获得明确书面授权的目标系统**。
-任何针对未授权目标的扫描、探测、入侵或数据获取，均属违法行为。
-使用者应自行承担全部法律责任。
+## Response timeline
+
+| Step | Timeframe |
+|---|---|
+| Acknowledgment of receipt | within **48 hours** |
+| Initial triage / severity assessment | within **3 days** |
+| Fix released | **critical/high**: as soon as possible (target ≤ 7 days) · medium/low: next release |
+| Public disclosure | after a fix is released and users have had time to update |
+
+If the report is accepted, you will be credited in the release notes (unless you
+prefer to stay anonymous).
+
+## Supported versions
+
+| Version | Status |
+|---|---|
+| latest (master) | ✅ actively supported |
+| previous minor (v0.6.x and older tags) | ⚠️ best-effort — update to latest |
+
+## Scope
+
+This policy covers vulnerabilities **in the UpClaw code itself** — e.g. command
+injection / path traversal in UpClaw's own request handling, unsafe parsing of
+untrusted scan output, or a bypass of the authorization gate
+(`require_authorization`).
+
+**Out of scope:** vulnerabilities of external tools that UpClaw merely
+orchestrates (nuclei / nmap / sqlmap / …); misuse of UpClaw against systems
+without authorization — that is on the operator, not the code.
+
+## Authorized-use reminder
+
+UpClaw is **for authorized security testing, CTF, security education and
+red-team exercises only**. Scanning, probing or exploiting systems without
+written authorization is illegal in most jurisdictions; operators are solely
+responsible for their actions.
