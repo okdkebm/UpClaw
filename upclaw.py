@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = "懰襬"
 
 """通用工具：HTTP 请求、目标解析、并发执行。仅使用标准库。"""
@@ -3121,6 +3121,274 @@ def _ext_run_zap(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | N
     return True
 
 
+# === UPCLAW-V0.5-EXT-TOOLS ===
+# 扩展外部工具适配层（v0.5）：wpscan / commix / hydra / masscan / gobuster / arjun。
+# 与 v0.3 适配器同规约：None=未安装，False=条件不满足，True=已执行。
+
+def _ext_run_wpscan(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """WPScan：WordPress 专扫（漏洞/用户枚举/插件）。输出 JSON 后归一化。"""
+    binary = _bin_path("wpscan")
+    if not binary:
+        return None
+    tmp = tempfile.mkstemp(prefix="upclaw-wpscan-", suffix=".json")
+    fd, out_json = tmp
+    os.close(fd)
+    try:
+        api_token = cfg.get("ext_wpscan_token", "")
+        argv = ["--url", url, "--format", "json", "--output", out_json,
+                "--no-banner", "--disable-tls-checks", "--api-token", api_token] if api_token else \
+               ["--url", url, "--format", "json", "--output", out_json,
+                "--no-banner", "--disable-tls-checks"]
+        _run_bin(binary, argv, timeout=float(cfg.get("ext_wpscan_timeout", 300)))
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return True
+        version = data.get("version") or {}
+        if isinstance(version, dict) and version.get("number"):
+            _add_finding(
+                store, "wpscan", f"WordPress {version['number']}", "INFO",
+                "VERIFIED", url, url,
+                "WPScan 识别到 WordPress 版本，可用 vulndb 比对已知漏洞。",
+                f"version={version['number']}  released={version.get('release_date') or '-'}",
+            )
+        found = data.get("findings") or []
+        if not isinstance(found, list):
+            found = []
+        n = 0
+        for it in found:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "WPScan 发现")
+            sev_raw = str(it.get("severity") or it.get("confidence") or "")
+            sev = "HIGH" if any(x in sev_raw.lower() for x in ("high", "critical")) else \
+                  "MEDIUM" if "medium" in sev_raw.lower() else \
+                  "LOW" if "low" in sev_raw.lower() else "INFO"
+            interest = it.get("interesting_entries") or []
+            ev = it.get("description") or " | ".join(map(str, interest))[:500] or title
+            _add_finding(store, "wpscan", f"WPScan: {title[:80]}", sev,
+                         "VERIFIED" if it.get("confirmed_by_confidence") else "UNVERIFIED",
+                         url, str(it.get("url") or url), "WPScan 专项扫描产出。", str(ev)[:500])
+            n += 1
+            if n >= 30:
+                break
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
+def _ext_run_commix(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Commix：命令注入专扫（--batch 非交互，仅 GET 探测向量）。"""
+    if "?" not in url:
+        return False  # commix 需要带查询参数的目标
+    binary = _bin_path("commix")
+    if not binary:
+        return None
+    out = _run_bin(
+        binary,
+        ["-u", url, "--batch", "--level", "1", "--risk", "1",
+         "--disable-coloring", "--skip-waf", "--max-attempts", "3"],
+        timeout=float(cfg.get("ext_commix_timeout", 240)),
+    )
+    if not out:
+        return True
+    if any(k in out for k in ("are injectable", "injection point", "+++", "Payload:")):
+        snippet = ""
+        for line in out.splitlines():
+            if any(k in line for k in ("injectable", "injection point", "+++", "Payload:", "command execution")):
+                snippet = (snippet + "\n" + line.strip())[:600]
+        _add_finding(
+            store, "commix", "Commix: 检测到命令注入点",
+            "CRITICAL", "VERIFIED", url, url,
+            "Commix 经真实请求确认存在命令注入向量，需人工复核可利用性。",
+            snippet or out.splitlines()[0].strip()[:500],
+        )
+    return True
+
+
+def _ext_run_hydra(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Hydra：服务弱口令爆破。需要用户配置字典；默认试内网/靶场常见弱口令。"""
+    binary = _bin_path("hydra")
+    if not binary:
+        return None
+    host, port, scheme, _ = parse_target(url)
+    users = cfg.get("ext_hydra_users") or "admin"
+    passes = cfg.get("ext_hydra_passes")
+    ulist = cfg.get("ext_hydra_userlist")
+    plist = cfg.get("ext_hydra_passlist")
+    if not passes and not plist:
+        # 未配置字典时不自动跑：避免无意义的默认爆破与授权边界问题
+        print("    [i] hydra 已安装但未配置口令字典（config set ext_hydra_passlist <路径>），跳过")
+        return True
+    argv: list[str] = []
+    if ulist:
+        argv += ["-L", ulist]
+    else:
+        argv += ["-l", users]
+    argv += ["-P", plist or passes, "-f", "-t", "4", "-o", "-"]
+    service = str(cfg.get("ext_hydra_service") or ("ssh" if port == 22 else "http-get"))
+    argv += [service, host]
+    out = _run_bin(binary, argv, timeout=float(cfg.get("ext_hydra_timeout", 240)))
+    if not out:
+        return True
+    creds: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        if any(k in line for k in ("login:", "password:", "host:")) and "valid password" not in line:
+            k = line.strip()[:140]
+            if k and k not in seen:
+                seen.add(k)
+                creds.append(k)
+        if "valid password found" in line.lower() or "[SUCCESS]" in line:
+            for ln in out.splitlines():
+                if "[22]" in ln or "[80]" in ln or "login:" in ln:
+                    if ln.strip() and ln.strip()[:140] not in seen:
+                        seen.add(ln.strip()[:140])
+                        creds.append(ln.strip()[:140])
+    if creds:
+        _add_finding(
+            store, "hydra",
+            f"Hydra: 发现可用口令（{service}@{host}）",
+            "CRITICAL", "VERIFIED", url, f"{host}:{port}",
+            "Hydra 爆破成功，得到可用凭据，可导致未授权访问或横向移动。",
+            " | ".join(creds[:5]),
+        )
+    return True
+
+
+def _ext_run_masscan(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Masscan：高速端口扫描（结果并入 recon 端口发现）。需 root/管理员权限。"""
+    binary = _bin_path("masscan")
+    if not binary:
+        return None
+    host, _, _, _ = parse_target(url)
+    ports = cfg.get("ext_masscan_ports") or "1-65535"
+    rate = cfg.get("ext_masscan_rate") or "1000"
+    fd, out_json = tempfile.mkstemp(prefix="upclaw-masscan-", suffix=".json")
+    os.close(fd)
+    try:
+        _run_bin(binary, ["-p", str(ports), "--rate", str(rate), "-oJ", out_json, host],
+                 timeout=float(cfg.get("ext_masscan_timeout", 120)))
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            return True
+        items = payload if isinstance(payload, list) else payload.get("hosts", [])
+        if not isinstance(items, list):
+            return True
+        open_ports: list[tuple[str, int]] = []
+        for h in items:
+            if not isinstance(h, dict):
+                continue
+            ip = h.get("ip", host)
+            for p in (h.get("ports") or []):
+                if isinstance(p, dict) and str(p.get("status")) == "open":
+                    open_ports.append((ip, int(p.get("port", 0) or 0)))
+        if open_ports:
+            detail = ", ".join(f"{ip}:{pt}" for ip, pt in open_ports[:20])
+            _add_finding(
+                store, "masscan",
+                f"Masscan: 发现 {len(open_ports)} 个开放端口", "INFO",
+                "VERIFIED", url, host,
+                "Masscan 高速扫描发现的开放 TCP 端口（1-65535 全量）。",
+                detail + (f" 等 {len(open_ports)} 个" if len(open_ports) > 20 else ""),
+            )
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
+def _ext_run_gobuster(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Gobuster：目录爆破（dir 模式，词表自动定位或 config wordlist）。"""
+    binary = _bin_path("gobuster")
+    if not binary:
+        return None
+    wordlist = _find_wordlist(cfg)
+    if not wordlist:
+        print("    [i] gobuster 已安装但未找到字典（config wordlist 或常见系统路径），跳过")
+        return True
+    base = url.rstrip("/") + "/"
+    out = _run_bin(
+        binary,
+        ["dir", "-u", base, "-w", wordlist, "-q", "-t", "20",
+         "-s", "200,204,301,302,307,401,403,500", "--timeout", "8s",
+         "--no-error", "--hide-length"],
+        timeout=float(cfg.get("ext_gobuster_timeout", 180)),
+    )
+    if not out:
+        return True
+    n = 0
+    for line in out.splitlines():
+        # gobuster 输出形如: /path (Status: 200) [Size: 1234] 或 /path (Status: 200)
+        if "Status:" not in line:
+            continue
+        path = line.split(" ", 1)[0].strip()
+        m = re.search(r"Status:\s*(\d+)", line)
+        st = int(m.group(1)) if m else 0
+        if not path or st not in (200, 204, 301, 302, 307, 401, 403, 500):
+            continue
+        sev = "LOW" if st in (200, 401, 403, 500) else "INFO"
+        _add_finding(
+            store, "gobuster",
+            f"Gobuster: {path}", sev, "UNVERIFIED", url, base + path.lstrip("/"),
+            "gobuster 目录爆破发现的路径（启发式，需人工复核确认内容与风险）。",
+            f"status={st}",
+        )
+        n += 1
+        if n >= 40:
+            break
+    return True
+
+
+def _ext_run_arjun(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Arjun：HTTP 参数发现（输出 JSON 后归一化为 INFO 提示）。"""
+    binary = _bin_path("arjun")
+    if not binary:
+        return None
+    tmp = tempfile.mkstemp(prefix="upclaw-arjun-", suffix=".json")
+    fd, out_json = tmp
+    os.close(fd)
+    try:
+        _run_bin(binary, ["-u", url, "-oJ", out_json, "-q", "-t", "10"],
+                 timeout=float(cfg.get("ext_arjun_timeout", 180)))
+        try:
+            with open(out_json, encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return True
+        params = []
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, list):
+                    params.extend(str(x) for x in v)
+        if params:
+            uniq = []
+            for p in params:
+                if p not in uniq:
+                    uniq.append(p)
+            _add_finding(
+                store, "arjun",
+                f"Arjun: 发现 {len(uniq)} 个隐藏参数", "INFO",
+                "UNVERIFIED", url, url,
+                "Arjun 字典比对发现的未文档化 HTTP 参数，可能隐藏调试开关/越权接口。",
+                "params: " + ", ".join(uniq[:20]),
+            )
+    finally:
+        try:
+            os.unlink(out_json)
+        except OSError:
+            pass
+    return True
+
+
 # 可自动执行的外部工具（顺序即扫描阶段的执行顺序）
 EXT_TOOL_RUN: dict[str, Callable[[FindingStore, str, dict[str, Any]], bool | None]] = {
     "subfinder": _ext_run_subfinder,
@@ -3132,6 +3400,13 @@ EXT_TOOL_RUN: dict[str, Callable[[FindingStore, str, dict[str, Any]], bool | Non
     "ffuf": _ext_run_ffuf,
     "dirsearch": _ext_run_dirsearch,
     "zap": _ext_run_zap,
+    # v0.5 扩展
+    "wpscan": _ext_run_wpscan,
+    "commix": _ext_run_commix,
+    "hydra": _ext_run_hydra,
+    "masscan": _ext_run_masscan,
+    "gobuster": _ext_run_gobuster,
+    "arjun": _ext_run_arjun,
 }
 
 # 检测展示用元数据（含无 CLI 的 GUI/API 类工具）
@@ -3145,6 +3420,12 @@ EXT_TOOL_LIST: list[dict[str, Any]] = [
     {"name": "subfinder", "display": "Subfinder", "category": "子域名枚举", "binaries": ["subfinder"]},
     {"name": "httpx", "display": "HTTPX", "category": "存活/技术栈探测", "binaries": ["httpx"]},
     {"name": "zap", "display": "OWASP ZAP", "category": "Web 主动扫描", "binaries": ["zap-baseline.py", "zap-cli", "zap"]},
+    {"name": "wpscan", "display": "WPScan", "category": "WordPress 专扫", "binaries": ["wpscan"]},
+    {"name": "commix", "display": "Commix", "category": "命令注入专扫", "binaries": ["commix"]},
+    {"name": "hydra", "display": "Hydra", "category": "服务口令爆破", "binaries": ["hydra"]},
+    {"name": "masscan", "display": "Masscan", "category": "高速端口扫描", "binaries": ["masscan"]},
+    {"name": "gobuster", "display": "Gobuster", "category": "目录/子域爆破", "binaries": ["gobuster"]},
+    {"name": "arjun", "display": "Arjun", "category": "HTTP 参数发现", "binaries": ["arjun"]},
     {"name": "yakit", "display": "Yakit(API)", "category": "一体化平台", "binaries": ["yakit", "yak"], "manual": True},
     {"name": "beef", "display": "BeEF", "category": "浏览器利用", "binaries": ["beef-xss", "beef"], "manual": True},
     {"name": "burpsuite", "display": "Burp Suite(API)", "category": "专业代理扫描", "binaries": ["BurpSuitePro", "burpsuite"], "manual": True},
@@ -3226,7 +3507,7 @@ def build_meta(target: str, started: float, cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "tool": "UpClaw",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "target": target,
         "started_at": datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -3757,6 +4038,309 @@ def cmd_cmp(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     return 0
 
 
+# ================================================================
+# === UPCLAW-V0.5-MODULES ===
+# 扩展内置检测模块（纯标准库，零依赖）：
+#   ssti          —— 模板注入初检（{{7*7}} 等回显探测）
+#   clickjacking  —— 点击劫持防护检测（XFO / CSP frame-ancestors 缺失）
+#   csrf          —— POST 表单 CSRF Token 缺失检测
+#   host-header   —— Host 头注入（缓存投毒 / 密码重置投毒信号）
+#   cms           —— 常见 CMS/框架指纹识别（WordPress/ThinkPHP/Drupal/...）
+# 签名统一为 (store, url, cfg)，由 scan 调度循环的通用分支调用。
+# ================================================================
+
+def _run_ssti(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """模板注入（SSTI）初检：注入多引擎计算型探测串，检查计算结果回显。
+
+    非破坏性：仅发送数学表达式（{{7*7}}/${7*7}/<%=7*7%> 等），不执行系统命令。
+    命中判定：探测串对应的计算结果（49 / 7777777）出现在响应中，且基线响应不含该值。
+    """
+    parsed = urllib.parse.urlparse(url)
+    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    if not params:
+        return
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    base = _get(url, cfg, limiter)
+    if not base.ok:
+        return
+    base_body = base.body or ""
+    probes = [
+        # (探测串, 期望回显, 引擎线索)
+        ("{{7*7}}", "49", "Jinja2 / Twig / Nunjucks / Tornado"),
+        ("${7*7}", "49", "FreeMarker / JSP EL / Thymeleaf"),
+        ("<%= 7*7 %>", "49", "ERB (Ruby)"),
+        ("#{7*7}", "49", "Thymeleaf / Ruby"),
+        ("{{7*'7'}}", "7777777", "Jinja2（字符串乘法）"),
+    ]
+    for key, orig in params:
+        for payload, needle, engine in probes:
+            if needle in base_body:
+                continue  # 基线已含该数字，无法区分，跳过
+            test_url = _build(url, key, payload)
+            r = _get(test_url, cfg, limiter)
+            if not r.ok:
+                continue
+            if needle in (r.body or "") and needle not in base_body:
+                store.add(
+                    title=f"模板注入（SSTI）— 参数 `{key}`",
+                    severity="HIGH",
+                    status="VERIFIED",
+                    category="ssti",
+                    target=url,
+                    location=f"参数 {key}",
+                    description=f"向参数 `{key}` 注入模板表达式 `{payload}` 后，响应回显计算结果 "
+                                f"`{needle}`，确认服务端模板被解析（疑似 {engine}）。模板注入常可升级为 RCE。",
+                    evidence=f"payload: {payload}\n回显: {needle}",
+                    request=f"GET {test_url}",
+                    impact="攻击者可在服务端执行模板表达式，结合各模板引擎的 RCE 手法（如 "
+                           "Jinja2 的 __class__ 链）可获取服务器控制权。",
+                    remediation="对用户输入做上下文相关转义；优先使用不执行逻辑的模板渲染方式；"
+                                "不要将用户输入拼入模板字符串。",
+                    references=["https://portswigger.net/web-security/server-side-template-injection"],
+                    cvss=8.8,
+                )
+                break
+        else:
+            continue
+        break
+
+
+def _run_clickjacking(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """点击劫持防护检测：GET 首页检查 X-Frame-Options 与 CSP frame-ancestors。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, _, err = _request_raw(url, cfg, "GET")
+    if err or not status:
+        return
+    low = {k.lower(): v for k, v in hdrs}
+    xfo = (low.get("x-frame-options") or "").strip()
+    csp = (low.get("content-security-policy") or "").strip()
+    has_frame_ancestors = bool(csp) and "frame-ancestors" in csp.lower()
+    if xfo or has_frame_ancestors:
+        return  # 已有防护，不报告
+    # 明确检查 CSP 本身存在但缺 frame-ancestors 的情形，单独说明
+    detail = "  X-Frame-Options: (未设置)\n"
+    detail += f"  Content-Security-Policy: {(csp[:80] + '...') if csp else '(未设置)'}"
+    note = "且 CSP 未声明 frame-ancestors" if csp else "且未设置 CSP"
+    store.add(
+        title="点击劫持防护缺失（可被 iframe 嵌套）",
+        severity="MEDIUM" if csp else "MEDIUM",
+        status="VERIFIED",
+        category="clickjacking",
+        target=url,
+        location=url,
+        description=f"响应未设置 X-Frame-Options 头{note}，攻击者可将该页面嵌套进恶意 "
+                    f"iframe 实施点击劫持（如诱导点击转账/授权按钮）。",
+        evidence=detail,
+        request=f"GET {url}",
+        impact="用户在不知情下触发敏感操作（改密、转账、授权 OAuth 等），造成账户或资金损失；"
+               "配合透明层技术可大幅提高攻击隐蔽性。",
+        remediation="设置响应头：X-Frame-Options: SAMEORIGIN 或 DENY；"
+                    "或通过 CSP 声明 frame-ancestors 'self'。二者至少启用其一。",
+        references=["https://owasp.org/www-community/attacks/Clickjacking"],
+        cvss=4.3,
+    )
+
+
+_CSRF_TOKEN_RE = re.compile(r"(?:csrf|_token|nonce|token|anticsrf)", re.I)
+
+
+def _run_csrf(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """CSRF 弱点检测：识别带会话 Cookie 的 POST 表单是否缺少 CSRF Token。
+
+    误报抑制：仅当 ① 站点设置了会话类 Cookie（Set-Cookie 含 PHPSESSID/JSESSIONID/session/id）
+    且 ② 存在 method=POST 且 action 指向本站的表单 且 ③ 表单内无隐藏 token 字段 时才报告。
+    """
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, body, err = _request_raw(url, cfg, "GET")
+    if err or not status or not body:
+        return
+    # 会话 Cookie 判定（宽松匹配常见会话名，避免把无会话的静态站也报一遍）
+    set_cookies = [v for k, v in hdrs if k.lower() == "set-cookie"]
+    session_names = ("sessionid", "phpsessid", "jsessionid", "asp.net_sessionid", "sid", "csrftoken")
+    has_session = any(
+        n in v.split(";", 1)[0].strip().lower() for v in set_cookies for n in session_names
+    )
+    if not has_session:
+        return
+    host = urllib.parse.urlparse(url).hostname or ""
+    forms = re.findall(r"<form\b[^>]*>.*?</form>", body, flags=re.I | re.S)
+    found = 0
+    for form in forms:
+        m = re.search(r"<form\b[^>]*method\s*=\s*[\"']?post[\"']?", form, flags=re.I)
+        if not m:
+            continue
+        action = re.search(r"<form\b[^>]*action\s*=\s*[\"']([^\"']*)[\"']", form, flags=re.I)
+        act = action.group(1) if action else ""
+        if act and act.startswith(("http://", "https://")) and host not in act:
+            continue  # 跨站表单不属于本站 CSRF 面
+        # token 判定只针对表单控件 name（action 路径里出现 "csrf" 等词不算数）
+        input_names = re.findall(r"<input\b[^>]*name\s*=\s*[\"']([^\"']*)[\"']", form, flags=re.I)
+        if any(_CSRF_TOKEN_RE.search(n) for n in input_names):
+            continue  # 表单自带 token 字段
+        # 确认表单存在可提交控件（input/select/button），过滤空表单
+        if not re.search(r"<input\b|<select\b|<textarea\b|<button\b", form, flags=re.I):
+            continue
+        found += 1
+        snippet = re.sub(r"\s+", " ", form)[:200]
+        store.add(
+            title="POST 表单缺少 CSRF Token",
+            severity="MEDIUM",
+            status="VERIFIED",
+            category="csrf",
+            target=url,
+            location=url,
+            description="目标设置了会话 Cookie，但页面存在不带 CSRF Token 的 POST 表单，"
+                        "跨站请求伪造可冒用受害者会话提交该表单。",
+            evidence=f"表单片段: {snippet}",
+            request=f"GET {url}（解析 HTML 表单）",
+            impact="攻击者可构造恶意页面，在受害者已登录状态下跨站触发状态变更请求"
+                   "（改资料、发帖、转账、改密等）。",
+            remediation="为所有状态变更请求引入不可预测的 CSRF Token（同步器模式），"
+                        "并在服务端校验；或使用 SameSite=Strict/Lax Cookie 作为纵深防御。",
+            references=["https://owasp.org/www-community/attacks/csrf"],
+            cvss=6.5,
+        )
+        if found >= 3:
+            break
+
+
+def _run_host_header(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """Host 头注入检测：发送伪造 Host 的请求，检查反射进 Location/绝对链接/缓存键的信号。
+
+    非破坏性：使用随机唯一域名作为 Host，仅观察服务端是否将其反射或据此生成链接。
+    """
+    import random as _rnd
+    import string as _str
+
+    marker = "upclaw-" + "".join(_rnd.choice(_str.ascii_lowercase + _str.digits) for _ in range(8))
+    evil_host = f"{marker}.example.net"
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, body, err = _request_raw(url, cfg, "GET", headers={"Host": evil_host})
+    if err or not status:
+        return
+    loc = ""
+    for k, v in hdrs:
+        if k.lower() == "location":
+            loc = v or ""
+    lower_body = (body or "").lower()
+    hit_body = marker.lower() in lower_body or evil_host.lower() in lower_body
+    hit_loc = marker.lower() in loc.lower() or evil_host.lower() in loc.lower()
+    if not hit_body and not hit_loc:
+        return
+    evidence_lines = [f"注入 Host: {evil_host}"]
+    if hit_loc:
+        evidence_lines.append(f"Location 反射: {loc[:200]}")
+    if hit_body:
+        i = lower_body.find(evil_host.lower())
+        if i < 0:
+            i = lower_body.find(marker.lower())
+        evidence_lines.append("响应体反射: ..." + (body or "")[max(0, i - 40): i + 120].replace("\n", " "))
+    store.add(
+        title="Host 头注入（值被服务端反射/使用）",
+        severity="MEDIUM",
+        status="VERIFIED",
+        category="host-header",
+        target=url,
+        location=url,
+        description="发送伪造 `Host` 头的请求后，注入的 Host 值被服务端反射到响应（Location 头"
+                    "或响应体链接/缓存键）中，可能被用于缓存投毒、密码重置链接投毒或路由欺骗。",
+        evidence="\n".join(evidence_lines),
+        request=f"GET {url}\nHost: {evil_host}",
+        impact="攻击者可利用反射的 Host 构造指向恶意域的链接（如密码重置邮件），"
+               "或污染共享缓存导致大范围投毒。",
+        remediation="服务端应基于白名单校验 Host 头并生成绝对链接；使用相对路径 URL；"
+                    "对异常 Host 返回 421 或 400。",
+        references=["https://portswigger.net/web-security/host-header"],
+        cvss=5.3,
+    )
+
+
+_CMS_HINTS: list[tuple[str, list[str], str]] = [
+    # (名称, 命中特征[正则], 备注)
+    ("WordPress", [r"wp-content", r"wp-includes", r'name=["\']generator["\'][^>]*WordPress'], ""),
+    ("Drupal", [r"(?:Drupal|drupal\.css|sites/default/files|SESS[a-z0-9]{32})"], ""),
+    ("Joomla", [r"/media/system/js/", r"joomla\.org", r"com_content"], ""),
+    ("ThinkPHP", [r"thinkphp", r"ThinkPHP", r"think\\", r"tp5|/think/"], "国内常见框架，历史版本存在多类 RCE"),
+    ("Laravel", [r"laravel_session", r"laravel\.php", r"csrf-token.*laravel", r"XSRF-TOKEN"], ""),
+    ("Spring Boot", [r"spring", r"whitelabel error page", r"actuator", r"X-Application-Context"], ""),
+    ("Shiro", [r"rememberMe=deleteMe", r"rememberme=deleteme"], "Shiro 反序列化漏洞频发，需确认版本"),
+    ("Struts2", [r"struts\.do|\.action", r"org\.apache\.struts", r"struts-tags"], "Struts2 历史 RCE 频发，需确认版本"),
+    ("Django", [r"csrftoken", r"django\.core", r"__admin_media_prefix__"], ""),
+    ("Discuz", [r"discuz", r"powered by discuz"], "国内常见论坛程序"),
+    ("phpMyAdmin", [r"phpmyadmin", r"pma_username", r"pmadb"], "数据库管理面板，暴露面大"),
+    ("GitLab", [r"gitlab", r"gon\.relative_url_root", r"_gitlab"], ""),
+]
+
+
+def _run_cms(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """CMS/框架指纹识别：抓取首页与常见特征路径，识别 WordPress/Drupal/ThinkPHP 等。"""
+    import re as _re
+
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, hdrs, body, err = _request_raw(url, cfg, "GET")
+    if err or not status:
+        return
+    low_body = (body or "").lower()
+    low_hdr = " ".join(f"{k}: {v}" for k, v in hdrs).lower()
+    blob = low_body + "\n" + low_hdr
+    hits = []
+    for name, patterns, note in _CMS_HINTS:
+        for pat in patterns:
+            if _re.search(pat, blob, flags=_re.I):
+                hits.append((name, note))
+                break
+    if not hits:
+        return
+    uniq = {}
+    for name, note in hits:
+        uniq.setdefault(name, note)
+    names = ", ".join(uniq.keys())
+    gen = _re.search(r'name=["\']generator["\'][^>]*content=["\']([^"\']+)', body or "", flags=_re.I)
+    version_txt = f"，Generator: {gen.group(1)}" if gen else ""
+    risky = [f"{n}（{note}）" for n, note in uniq.items() if note]
+    sev = "MEDIUM" if risky else "INFO"
+    store.add(
+        title=f"识别到 CMS/框架: {names}",
+        severity=sev,
+        status="VERIFIED",
+        category="cms",
+        target=url,
+        location=url,
+        description=f"通过响应特征识别到 {names}{version_txt}。" + (
+            "以下组件历史漏洞高发：" + "；".join(risky) + "，建议确认版本并核查已知 CVE。"
+            if risky else ""
+        ),
+        evidence="命中特征: " + " | ".join(
+            f"{n}:{next(p for p in _CMS_HINTS if p[0] == n)[1][0]}" for n in uniq
+        ),
+        request=f"GET {url}",
+        impact="精准指纹可让攻击者直接套用对应 CMS 的已知漏洞利用链，缩小攻击成本；"
+               "识别出的组件版本越旧，被公开 PoC 命中的概率越高。",
+        remediation="及时升级 CMS 与插件至最新版；隐藏 generator meta 与版本号；"
+                    "移除默认路径与指纹特征（如 favicon、特定静态资源）。",
+        references=["https://www.wappalyzer.com/technologies/cms"],
+        cvss=None if sev == "INFO" else 5.0,
+    )
+
+
+# ---- v0.5 新模块注册（并入 AVAILABLE 并刷新默认启用集）----
+_V05_MODULES: dict[str, Callable[[FindingStore, str, dict[str, Any]], None]] = {
+    "ssti": _run_ssti,
+    "clickjacking": _run_clickjacking,
+    "csrf": _run_csrf,
+    "host-header": _run_host_header,
+    "cms": _run_cms,
+}
+for _n, _f in _V05_MODULES.items():
+    AVAILABLE[_n] = _f
+DEFAULT_CHECKS = ",".join(AVAILABLE)
+del _V05_MODULES, _n, _f
+
+
 def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     started = time.time()
     raw_targets = [t.strip() for t in args.target.split(",") if t.strip()]
@@ -3973,7 +4557,7 @@ def cmd_tools(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         path = info["path"] if info["installed"] else "-"
         print(f"  {disp:<16}{cat:<18}{st:<12}{path[:40]}")
     print("\n说明:")
-    print("  · 可自动执行的工具（nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/zap）")
+    print("  · 可自动执行的工具（nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/zap/wpscan/commix/hydra/masscan/gobuster/arjun）")
     print("    在 scan 时被自动调用，结果统一进入 UpClaw 报告；")
     print("    可用 --no-ext 关闭，--ext-tools nuclei,sqlmap 只启用指定工具。")
     print("  · Yakit/BeEF/Burp Suite/AppScan/ARL 为 GUI/API 类工具，请按其文档人工驱动。")
@@ -4008,7 +4592,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="完整扫描（信息收集 + 安全检测）")
     s.add_argument("target", help="目标，如 example.com 或 https://x.com/p?id=1")
     add_common(s)
-    s.add_argument("--checks", help="启用模块，逗号分隔，默认全部内置模块（dns,subdomain,waf,tls,cmdi,ssrf,xxe,lfi,open-redirect,crlf,dir,backup,fuzz,cors,cookie,methods,webdav,headers,sensitive,sqli,xss；外部工具: nuclei,nmap,sqlmap,nikto,ffuf,dirsearch,subfinder,httpx,zap）")
+    s.add_argument("--checks", help="启用模块，逗号分隔，默认全部内置模块（dns,subdomain,waf,tls,cmdi,ssrf,xxe,lfi,open-redirect,crlf,dir,backup,fuzz,cors,cookie,methods,webdav,headers,sensitive,sqli,xss,ssti,clickjacking,csrf,host-header,cms；外部工具: nuclei,nmap,sqlmap,nikto,ffuf,dirsearch,subfinder,httpx,zap,wpscan,commix,hydra,masscan,gobuster,arjun）")
     s.add_argument("--no-ext", action="store_true",
                    help="关闭外部工具适配阶段（默认自动调用已安装的外部工具）")
     s.add_argument("--ext-tools", help="仅启用指定外部工具，逗号分隔，如 nuclei,sqlmap")
