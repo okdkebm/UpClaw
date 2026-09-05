@@ -19,7 +19,7 @@
 
 - **目标驱动收敛**：达成目标自动停止，不浪费资源
 
-- **28 项渗透技能**：信息收集 6 + 漏洞验证 9 + 暴力破解 3 + Web 安全 10（详见下方能力矩阵）
+- **31 项渗透技能**：信息收集 6 + 漏洞验证 10 + 暴力破解 3 + Web 安全 12（详见下方能力矩阵）
 
 - **外置工具适配层（v0.3/v0.5）**：自动检测本机已装的 nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/ZAP/wpscan/commix/hydra/masscan/gobuster/arjun 等工具，扫描时自动调用，结果统一归一化进入报告；并检测 Yakit/BeEF/Burp/AppScan/ARL
 
@@ -28,6 +28,8 @@
 - **手动工具链（v0.4）**：Burp 式手动三件套 `req`（改包重放）/ `codec`（编解码）/ `cmp`（响应对比），靶场手测无需另开 GUI 工具
 
 - **扩展检测模块（v0.5）**：新增 SSTI 模板注入、点击劫持、CSRF Token 缺失、Host 头注入、CMS/框架指纹 5 个内置模块，纯标准库零依赖
+
+- **扩展检测模块（v0.6）**：子域接管（takeover）、JS 密钥猎手（js-secrets）、GraphQL introspection 泄露验证 3 个新内置模块；Nuclei 定向扫描参数（`--nuclei-tags/--nuclei-severity/--nuclei-template`）；Gau 历史 URL 采集适配；报告新增证据时间线 + `trace.json` 轨迹回放
 
 ## 快速开始
 
@@ -79,9 +81,9 @@ User Input → Reason → Explore → Fact → Reflect → Report → Done
 | 类别        | 技能（模块名）                                                                                                  |
 | --------- | -------------------------------------------------------------------------------------------------------- |
 | 信息收集（6）   | 指纹识别、端口扫描、DNS 枚举（dns）、子域名扫描（subdomain）、WAF 检测（waf）、TLS/HTTPS 检查（tls）                                     |
-| 漏洞验证（9）   | SQL 注入（sqli）、XSS（xss）、命令注入（cmdi）、SSRF（ssrf）、XXE（xxe）、本地文件包含/路径遍历（lfi）、开放重定向（open-redirect）、CRLF 注入（crlf）、模板注入（ssti） |
+| 漏洞验证（10）  | SQL 注入（sqli）、XSS（xss）、命令注入（cmdi）、SSRF（ssrf）、XXE（xxe）、本地文件包含/路径遍历（lfi）、开放重定向（open-redirect）、CRLF 注入（crlf）、模板注入（ssti）、GraphQL introspection（graphql） |
 | 暴力破解（3）   | 目录爆破（dir）、备份文件扫描（backup）、参数模糊测试（fuzz）                                                                    |
-| Web 安全（10） | CORS 配置（cors）、Cookie 安全（cookie）、HTTP 方法（methods）、WebDAV（webdav）、安全响应头（headers）、敏感路径（sensitive）、点击劫持（clickjacking）、CSRF（csrf）、Host 头注入（host-header）、CMS/框架指纹（cms）           |
+| Web 安全（12） | CORS 配置（cors）、Cookie 安全（cookie）、HTTP 方法（methods）、WebDAV（webdav）、安全响应头（headers）、敏感路径（sensitive）、点击劫持（clickjacking）、CSRF（csrf）、Host 头注入（host-header）、CMS/框架指纹（cms）、子域接管（takeover）、JS 密钥猎手（js-secrets）           |
 
 ## 外置工具适配层（v0.3）
 
@@ -102,10 +104,11 @@ UpClaw 会自动检测本机已安装的安全工具，扫描时自动调用并�
 | masscan           | 高速端口扫描   | 全量 1-65535 端口（需 root/管理员） |
 | gobuster          | 目录/子域爆破  | 需字典；输出 200/401/403 等状态    |
 | arjun             | HTTP 参数发现  | 发现未文档化隐藏参数               |
+| gau               | 历史 URL 采集   | Wayback/CommonCrawl/OTX 档案回溯  |
 
-检测与状态：`upclaw tools` 查看全部 20 项工具的检测结果（含 Yakit、BeEF、Burp Suite、AppScan、ARL 的识别与人工/API 驱动提示）。
+检测与状态：`upclaw tools` 查看全部 21 项工具的检测结果（含 Yakit、BeEF、Burp Suite、AppScan、ARL 的识别与人工/API 驱动提示）。
 
-> 外部工具按其各自开源/商业许可独立分发，UpClaw 仅做驱动与结果归一化；未安装时自动跳过，不影响核心零依赖能力。使用 `--no-ext` 关闭该阶段，`--ext-tools nuclei,sqlmap` 只启用指定工具；ffuf/gobuster 字典可用 `config set wordlist <路径>` 配置；hydra 口令字典用 `config set ext_hydra_userlist <路径>` / `config set ext_hydra_passlist <路径>` 配置。
+> 外部工具按其各自开源/商业许可独立分发，UpClaw 仅做驱动与结果归一化；未安装时自动跳过，不影响核心零依赖能力。使用 `--no-ext` 关闭该阶段，`--ext-tools nuclei,sqlmap` 只启用指定工具；ffuf/gobuster 字典可用 `config set wordlist <路径>` 配置；hydra 口令字典用 `config set ext_hydra_userlist <路径>` / `config set ext_hydra_passlist <路径>` 配置。Nuclei 支持定向扫描：`--nuclei-tags cve,wordpress` / `--nuclei-severity high,critical` / `--nuclei-template <文件>`。
 
 ## 扩展检测模块（v0.5）
 
@@ -126,6 +129,39 @@ upclaw scan http://靶场/page?id=1 --checks ssti --auth-file auth.json
 # 组合多个模块
 upclaw scan http://靶场/ --checks ssti,clickjacking,csrf,cms --auth-file auth.json
 ```
+
+## 扩展检测模块（v0.6）
+
+| 模块            | 检测目标             | 手法                          | 判定            |
+| ------------- | ----------------- | --------------------------- | ------------- |
+| `takeover`    | 子域接管             | CNAME 查询 → 云服务指纹匹配（S3/GitHub Pages/Heroku 等 25 项） | 目标无法解析 → HIGH；可解析 → LOW 待复核 |
+| `js-secrets`  | JS 文件密钥泄露        | 抓页面引用 JS → 15 类密钥正则（AWS/GitHub/Slack/私钥…） | 命中即报（脱敏展示） |
+| `graphql`     | GraphQL introspection 泄露 | POST `__schema` 查询到 /graphql 等 8 端点 | 回显 __schema → HIGH |
+
+```bash
+# 子域接管检测（扫描时会自动对主域 + 16 个常见子域做 CNAME 指纹比对）
+upclaw scan http://target.com --checks takeover --auth-file auth.json
+
+# JS 密钥猎手
+upclaw scan http://target.com/app --checks js-secrets --auth-file auth.json
+
+# Nuclei 定向扫描（先 cms 指纹，再按指纹定向跑模板）
+upclaw scan http://target.com --nuclei-tags wordpress,cve --nuclei-severity high --auth-file auth.json
+```
+
+## 证据轨迹（v0.6）
+
+每次 `scan` 除 HTML/MD/JSON 报告外，额外输出 **`trace.json`**——按时间序回放每条发现的完整决策链（步骤号/时间/严重级/请求/证据/影响/修复建议），报告内同步提供"执行轨迹"时间线表格。适用于：
+
+- 客户对审计过程的逐条溯源（每步都有原始证据支撑）
+- AI 二次分析：把 `trace.json` 喂给大模型做攻击链推理与复测规划
+- 团队复核：按时间线核对扫描是否覆盖了所有关键面
+
+## Roadmap（规划中）
+
+- **任务树方法论**：扫描发现 → 动态规划下一步验证/利用（参考 PentestGPT 的任务推理）
+- **多 Agent 分工**：recon / 扫描 / 利用 / 报告分角色协作（复用 AGI 沙盒 7-Agent 架构）
+- **内置轻量 PoC 库**：参照 nuclei 单模板结构，沉淀高频 CVE 的零依赖验证模板
 
 ## 手动工具链（v0.4）
 

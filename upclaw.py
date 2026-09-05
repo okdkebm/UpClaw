@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "懰襬"
 
 """通用工具：HTTP 请求、目标解析、并发执行。仅使用标准库。"""
@@ -2751,7 +2751,18 @@ def _ext_run_nuclei(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool 
     binary = _bin_path("nuclei")
     if not binary:
         return None
-    out = _run_bin(binary, ["-u", url, "-jsonl", "-silent"],
+    argv = ["-u", url, "-jsonl", "-silent"]
+    # v0.6: 定向扫描参数（--nuclei-tags / --nuclei-severity / --nuclei-template）
+    tags = str(cfg.get("ext_nuclei_tags") or "").strip()
+    if tags:
+        argv += ["-tags", tags]
+    sev = str(cfg.get("ext_nuclei_severity") or "").strip()
+    if sev:
+        argv += ["-severity", sev]
+    tpl = str(cfg.get("ext_nuclei_template") or "").strip()
+    if tpl:
+        argv += ["-t", tpl]
+    out = _run_bin(binary, argv,
                    timeout=float(cfg.get("ext_nuclei_timeout", 240)))
     if not out:
         return True
@@ -3389,6 +3400,65 @@ def _ext_run_arjun(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool |
     return True
 
 
+# === UPCLAW-V0.6-EXT-TOOLS ===
+# gau —— 历史 URL 采集（Wayback/OTX/CommonCrawl 档案），补被动收集能力。
+
+def _ext_run_gau(store: FindingStore, url: str, cfg: dict[str, Any]) -> bool | None:
+    """Gau：从公开 Web 档案（wayback/commoncrawl/otx）采集目标历史 URL。
+    结果为被动情报（INFO，供 AI 规划后续定向测试），不直接判定漏洞。"""
+    binary = _bin_path("gau")
+    if not binary:
+        return None
+    host, _, _, _ = parse_target(url)
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", host, re.I):
+        return False
+    out = _run_bin(
+        binary,
+        ["--threads", "8", "--subs", "--timeout", "15", "--json", host],
+        timeout=float(cfg.get("ext_gau_timeout", 120)),
+    )
+    if not out:
+        return True
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        u = line
+        if line.startswith("{"):
+            try:
+                item = json.loads(line)
+                u = str(item.get("url") or "")
+            except ValueError:
+                continue
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        urls.append(u)
+        if len(urls) >= 60:
+            break
+    if not urls:
+        return True
+    # 分组展示：按路径前缀归并，减少噪音
+    groups: dict[str, list[str]] = {}
+    for u in urls:
+        pp = urllib.parse.urlparse(u)
+        key = f"{pp.scheme}://{pp.netloc}{pp.path}"
+        groups.setdefault(key.rsplit("/", 1)[0] if "/" in pp.path else key, []).append(u)
+    detail_lines = list(groups.keys())[:15]
+    detail = "\n".join(f"  - {d}（{len(groups[d])} 条）" for d in detail_lines)
+    _add_finding(
+        store, "gau",
+        f"Gau: 采集到 {len(urls)} 个历史 URL",
+        "INFO", "UNVERIFIED", url, host,
+        "Gau 从公开 Web 档案采集到目标的历史 URL，可能暴露已下线接口、旧版参数与"
+        "未公开的管理路径，供后续定向测试。",
+        detail + (f"\n  …共 {len(groups)} 个路径前缀" if len(groups) > 15 else ""),
+    )
+    return True
+
+
 # 可自动执行的外部工具（顺序即扫描阶段的执行顺序）
 EXT_TOOL_RUN: dict[str, Callable[[FindingStore, str, dict[str, Any]], bool | None]] = {
     "subfinder": _ext_run_subfinder,
@@ -3407,6 +3477,8 @@ EXT_TOOL_RUN: dict[str, Callable[[FindingStore, str, dict[str, Any]], bool | Non
     "masscan": _ext_run_masscan,
     "gobuster": _ext_run_gobuster,
     "arjun": _ext_run_arjun,
+    # v0.6 扩展
+    "gau": _ext_run_gau,
 }
 
 # 检测展示用元数据（含无 CLI 的 GUI/API 类工具）
@@ -3426,6 +3498,7 @@ EXT_TOOL_LIST: list[dict[str, Any]] = [
     {"name": "masscan", "display": "Masscan", "category": "高速端口扫描", "binaries": ["masscan"]},
     {"name": "gobuster", "display": "Gobuster", "category": "目录/子域爆破", "binaries": ["gobuster"]},
     {"name": "arjun", "display": "Arjun", "category": "HTTP 参数发现", "binaries": ["arjun"]},
+    {"name": "gau", "display": "Gau", "category": "历史 URL 采集", "binaries": ["gau"]},
     {"name": "yakit", "display": "Yakit(API)", "category": "一体化平台", "binaries": ["yakit", "yak"], "manual": True},
     {"name": "beef", "display": "BeEF", "category": "浏览器利用", "binaries": ["beef-xss", "beef"], "manual": True},
     {"name": "burpsuite", "display": "Burp Suite(API)", "category": "专业代理扫描", "binaries": ["BurpSuitePro", "burpsuite"], "manual": True},
@@ -3507,7 +3580,7 @@ def build_meta(target: str, started: float, cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "tool": "UpClaw",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "target": target,
         "started_at": datetime.fromtimestamp(started).astimezone().isoformat(timespec="seconds"),
         "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -3568,6 +3641,20 @@ def render_markdown(meta: dict[str, Any], store: FindingStore, recon: dict[str, 
         L.append("")
 
     # 已验证发现
+    L.append("## 执行轨迹（证据时间线）")
+    L.append("")
+    if not store.items:
+        L.append("无执行记录。")
+    else:
+        L.append("| # | 时间 | 严重级 | 状态 | 类别 | 标题 |")
+        L.append("|---|------|--------|------|------|------|")
+        for i, f in enumerate(sorted(store.items, key=lambda x: x.timestamp), 1):
+            ts = (f.timestamp or "")[11:19]
+            L.append(f"| {i} | {ts} | {f.severity} | {f.status} | {f.category} | {_md_escape(f.title[:48])} |")
+    L.append("")
+    L.append("> 完整轨迹与证据见 `trace.json`（按时间序逐条回放请求/证据/影响/修复建议）。")
+    L.append("")
+
     L.append("## 已验证发现（可交付）")
     L.append("")
     if not v:
@@ -3787,6 +3874,39 @@ def save_reports(
             fh.write(f"[{f.severity}] {f.title}\n")
             fh.write(f"编号: {f.id}\n位置: {f.location}\n")
             fh.write(f"请求: {f.request}\n\n--- 证据 ---\n{f.evidence}\n")
+
+    # v0.6: 证据轨迹 trace.json（按时间序回放每次发现的完整决策链，供审计与二次分析）
+    trace_path = os.path.join(out_dir, "trace.json")
+    trace_items = []
+    for f in sorted(store.items, key=lambda x: x.timestamp):
+        d = f.to_dict()
+        trace_items.append({
+            "step": len(trace_items) + 1,
+            "timestamp": d["timestamp"],
+            "id": d["id"],
+            "severity": d["severity"],
+            "status": d["status"],
+            "category": d["category"],
+            "title": d["title"],
+            "location": d["location"],
+            "request": d["request"],
+            "evidence": d["evidence"],
+            "impact": d["impact"],
+            "remediation": d["remediation"],
+        })
+    with open(trace_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "tool": meta.get("tool"),
+                "version": meta.get("version"),
+                "target": meta.get("target"),
+                "started_at": meta.get("started_at"),
+                "finished_at": meta.get("finished_at"),
+                "replay": trace_items,
+            },
+            f, ensure_ascii=False, indent=2,
+        )
+    paths["trace"] = trace_path
     return paths
 
 
@@ -4341,6 +4461,299 @@ DEFAULT_CHECKS = ",".join(AVAILABLE)
 del _V05_MODULES, _n, _f
 
 
+# ================================================================
+# === UPCLAW-V0.6-MODULES ===
+# 扩展内置检测模块 v0.6：
+#   takeover   —— 子域接管（CNAME → 失效云服务指纹，参考 can-i-take-over-xyz）
+#   js-secrets —— JS 文件敏感信息猎手（API key / 令牌 / 私钥正则扫描）
+#   graphql    —— GraphQL introspection 泄露验证（区别于 sensitive 的端点探测）
+# 签名统一为 (store, url, cfg)。
+# ================================================================
+
+# ---- takeover: 常见可接管云服务指纹（CNAME 后缀, 服务名, 危害）----
+TAKEOVER_FINGERPRINTS = [
+    ("s3.amazonaws.com", "AWS S3 Bucket"),
+    ("s3-website", "AWS S3 静态托管"),
+    ("cloudfront.net", "AWS CloudFront"),
+    ("github.io", "GitHub Pages"),
+    ("github.map.fastly.net", "GitHub Pages(Fastly)"),
+    ("herokuapp.com", "Heroku"),
+    ("herokudns.com", "Heroku"),
+    ("azurewebsites.net", "Azure App Service"),
+    ("cloudapp.net", "Azure Cloud App"),
+    ("azurefd.net", "Azure Front Door"),
+    ("trafficmanager.net", "Azure Traffic Manager"),
+    ("fastly.net", "Fastly"),
+    ("pantheon.io", "Pantheon"),
+    ("shopify.com", "Shopify"),
+    ("wordpress.com", "WordPress.com"),
+    ("netlify.app", "Netlify"),
+    ("surge.sh", "Surge"),
+    ("bitbucket.io", "Bitbucket Pages"),
+    ("tumblr.com", "Tumblr"),
+    ("ghost.io", "Ghost"),
+    ("readme.io", "ReadMe"),
+    ("zendesk.com", "Zendesk"),
+    ("strikingly.com", "Strikingly"),
+    ("web.app", "Firebase"),
+    ("firebaseapp.com", "Firebase"),
+]
+
+
+def _cname_lookup(hostname: str, timeout: float = 4.0) -> str | None:
+    """用系统 nslookup 查询 CNAME（跨平台，nslookup 为 Windows/macOS/Linux 自带）。
+    返回规范化 CNAME（小写、去尾点），查询失败/无 CNAME 返回 None。"""
+    binary = shutil.which("nslookup") or shutil.which("dig")
+    if not binary:
+        return None
+    try:
+        if "nslookup" in binary:
+            cp = subprocess.run([binary, "-type=CNAME", hostname],
+                                capture_output=True, text=True, timeout=timeout,
+                                errors="replace")
+        else:  # dig
+            cp = subprocess.run([binary, "+short", "CNAME", hostname],
+                                capture_output=True, text=True, timeout=timeout,
+                                errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = (cp.stdout or "") + "\n" + (cp.stderr or "")
+    for line in out.splitlines():
+        if "canonical name" in line.lower() or "alias" in line.lower():
+            m = re.search(r"=\s*([a-z0-9.-]+\.?)", line, re.I)
+            if m:
+                return m.group(1).lower().rstrip(".")
+    return None
+
+
+def _run_takeover(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """子域接管检测：解析 CNAME 并匹配失效云服务指纹。
+
+    判定标准（证据优先）：
+    - 目标域名/常见子域存在 CNAME 记录；
+    - CNAME 目标命中已知可接管云服务指纹（S3/GitHub Pages/Heroku/Netlify 等）；
+    - 且该 CNAME 目标无法解析（服务已注销）→ VERIFIED(HIGH) 可接管。
+    若 CNAME 目标仍可解析，则仅提示需人工复核（LOW），避免误报。
+    """
+    host, _, _, _ = parse_target(url)
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", host, re.I):
+        return
+    # 被探测的候选：主机本身 + 常见可接管子域
+    base = host
+    candidates = [base] if len(base.split(".")) > 2 else []
+    for sub in ("www", "blog", "docs", "support", "help", "status", "mail",
+                "staging", "dev", "test", "app", "portal", "assets", "cdn", "shop"):
+        candidates.append(f"{sub}.{base}")
+    # 先全量收集指纹命中，避免提前 break 漏检
+    dead: list[tuple[str, str, str]] = []    # (cand, cname, 服务) 已失效 → 可接管
+    alive: list[tuple[str, str, str]] = []   # (cand, cname, 服务) 仍解析 → 待人工复核
+    for cand in candidates:
+        cname = _cname_lookup(cand)
+        if not cname:
+            continue
+        cname_l = cname.lower()
+        match = None
+        for suffix, svc in TAKEOVER_FINGERPRINTS:
+            if suffix in cname_l:
+                match = svc
+                break
+        if not match:
+            continue
+        try:
+            socket.gethostbyname(cname)
+            alive.append((cand, cname, match))
+        except socket.gaierror:
+            dead.append((cand, cname, match))
+    if not dead and not alive:
+        return
+    # HIGH 优先：CNAME 目标已失效 → 可接管（最多 3 条避免刷屏）
+    for cand, cname, match in dead[:3]:
+        store.add(
+            title=f"子域接管（{match}）— {cand}",
+            severity="HIGH",
+            status="VERIFIED",
+            category="takeover",
+            target=url,
+            location=cand,
+            description=f"{cand} 的 CNAME 指向 {cname}（{match}），且该目标当前无法解析，"
+                        f"表明原服务已注销/释放，攻击者可在该平台注册同名资源完成接管。",
+            evidence=f"CNAME: {cand} -> {cname}\n解析: 失败（服务未占用）",
+            request=f"nslookup -type=CNAME {cand}",
+            impact="接管后可控制该子域并托管任意内容，用于钓鱼、窃取 Cookie、绕过"
+                   "同源策略或冒充官方服务。",
+            remediation="注销不再使用的子域，删除 DNS CNAME 记录；监控 CNAME 指向"
+                        "云服务的域名并在服务到期前处理。",
+            references=["https://github.com/EdOverflow/can-i-take-over-xyz"],
+            cvss=7.5,
+        )
+    # 无确认接管时，聚合提示一条待人工复核（避免逐条 LOW 噪音）
+    if not dead and alive:
+        detail = "\n".join(f"  - {c}: {cn}（{sv}）" for c, cn, sv in alive[:6])
+        store.add(
+            title=f"{len(alive)} 个子域 CNAME 指向云服务（需人工复核占用状态）",
+            severity="LOW",
+            status="UNVERIFIED",
+            category="takeover",
+            target=url,
+            location=base,
+            description="以下子域的 CNAME 指向第三方云服务，且目标当前可解析。"
+                        "若对应云资源实际已释放（过期项目常见），则存在被接管风险。",
+            evidence=detail,
+            request="nslookup -type=CNAME <子域>",
+            impact="若该云服务资源实际已释放但 DNS 未清理，攻击者可接管子域。",
+            remediation="确认这些 CNAME 目标对应的云资源仍属于本组织；若已不用请删除记录。",
+            references=["https://github.com/EdOverflow/can-i-take-over-xyz"],
+            cvss=3.7,
+        )
+
+
+# ---- js-secrets: JS 敏感信息正则模式 ----
+JS_SECRET_PATTERNS: list[tuple[str, str, str]] = [
+    # (名称, 正则, 严重级)
+    ("AWS Access Key", r"(?:AKIA|ASIA)[0-9A-Z]{16}", "HIGH"),
+    ("AWS Secret Key", r"(?i)aws.{0,20}['\"][0-9a-zA-Z/+]{40}['\"]", "HIGH"),
+    ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}", "MEDIUM"),
+    ("GitHub Token", r"gh[pousr]_[0-9A-Za-z]{36,255}", "HIGH"),
+    ("GitHub OAuth", r"gho_[0-9A-Za-z]{36,255}", "HIGH"),
+    ("Slack Token", r"xox[baprs]-[0-9A-Za-z\-]{10,}", "HIGH"),
+    ("Stripe Secret", r"sk_live_[0-9a-zA-Z]{24,}", "HIGH"),
+    ("Stripe Publishable", r"pk_live_[0-9a-zA-Z]{24,}", "LOW"),
+    ("Google OAuth Secret", r"(?i)(google_client_secret|client_secret).{0,20}['\"][0-9A-Za-z\-_]{24,}['\"]", "HIGH"),
+    ("JWT Token", r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "MEDIUM"),
+    ("Firebase Key", r"AIza[0-9A-Za-z\-_]{35}", "MEDIUM"),
+    ("SendGrid Key", r"SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}", "HIGH"),
+    ("Twilio Key", r"SK[0-9a-fA-F]{32}", "MEDIUM"),
+    ("通用 API Key", r"(?i)(api[_-]?key|apikey|secret[_-]?key|access[_-]?key|auth[_-]?token|bearer)\s*[:=]\s*['\"][0-9a-zA-Z\-_]{16,}['\"]", "MEDIUM"),
+    ("私钥 PEM", r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", "HIGH"),
+]
+
+
+def _run_js_secrets(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """JS 文件敏感信息猎手：抓取页面引用的 JS，正则扫描硬编码密钥/令牌。"""
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.05)
+    limiter.wait()
+    status, _, body, err = _request_raw(url, cfg, "GET")
+    if err or not status or not body:
+        return
+    parsed = urllib.parse.urlparse(url)
+    # 提取页面引用的本地 JS（跳过外域与明显第三方 CDN，控制请求量）
+    refs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', body, flags=re.I)
+    js_urls: list[str] = []
+    for ref in refs[:12]:
+        if ref.startswith("data:"):
+            continue
+        js = urllib.parse.urljoin(url, ref)
+        jh = urllib.parse.urlparse(js).hostname or ""
+        if jh and jh != parsed.hostname:
+            continue  # 仅本域 JS，减少噪音与授权边界问题
+        js_urls.append(js)
+    if not js_urls:
+        return
+    hits: dict[str, list[tuple[str, str]]] = {}  # secret_name -> [(js_url, 摘要)]
+    for js_url in js_urls:
+        limiter.wait()
+        s2, _, js_body, err2 = _request_raw(js_url, cfg, "GET")
+        if err2 or not s2 or not js_body:
+            continue
+        for name, pat, sev in JS_SECRET_PATTERNS:
+            for m in re.finditer(pat, js_body):
+                snippet = js_body[max(0, m.start() - 30): m.end() + 30]
+                snippet = re.sub(r"\s+", " ", snippet)
+                # 脱敏展示：值体中间打码
+                sm = re.sub(r"(['\"]?)([0-9A-Za-z/_+\-=]{16,})(['\"]?)",
+                            lambda g: g.group(1) + g.group(2)[:4] + "***" + g.group(3), snippet)
+                hits.setdefault(name, []).append((js_url, sm[:180]))
+    if not hits:
+        return
+    for name, occ in list(hits.items())[:6]:
+        sev = next((s for n, _, s in JS_SECRET_PATTERNS if n == name), "MEDIUM")
+        detail = "\n".join(f"  - {u}: {sn}" for u, sn in occ[:3])
+        store.add(
+            title=f"JS 文件泄露敏感信息（{name}）",
+            severity=sev,
+            status="VERIFIED",
+            category="js-secrets",
+            target=url,
+            location=occ[0][0],
+            description=f"在页面引用的 JavaScript 文件中发现疑似 {name}。",
+            evidence=detail,
+            request=f"GET {occ[0][0]}",
+            impact="硬编码的密钥/令牌可被直接用于未授权调用对应云服务/API，造成数据泄露或资金损失。",
+            remediation="移除代码中的硬编码凭据，改用环境变量/密钥管理系统（如 Vault）；"
+                        "发现泄露的密钥应立即轮换。",
+            references=["https://owasp.org/www-project-top-ten/"],
+            cvss=8.1 if sev == "HIGH" else 5.3,
+        )
+
+
+# ---- graphql: introspection 泄露验证 ----
+GRAPHQL_PATHS = ["/graphql", "/graphiql", "/v1/graphql", "/api/graphql",
+                 "/query", "/gql", "/graph", "/_graphql"]
+
+
+def _run_graphql(store: FindingStore, url: str, cfg: dict[str, Any]) -> None:
+    """GraphQL introspection 泄露验证：POST introspection 查询，检测 __schema 回显。
+
+    与 sensitive 模块的区别：sensitive 仅探测端点路径存在；本模块做主动
+    introspection 查询验证，能确认泄露即报 HIGH。
+    """
+    parsed = urllib.parse.urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    limiter = RateLimiter(float(cfg.get("rate_limit", 0.0)) or 0.06)
+    # introspection 查询
+    query = "query{__schema{types{name}}}"
+    payload = f'{{"query":"{query}"}}'
+    for path in GRAPHQL_PATHS:
+        test = base + path
+        limiter.wait()
+        r = http_request(
+            test, method="POST",
+            headers={"Content-Type": "application/json"},
+            body=payload,
+            timeout=float(cfg.get("timeout", 6.0)),
+            follow_redirects=False,
+            verify_tls=bool(cfg.get("verify_tls", False)),
+            user_agent=str(cfg.get("user_agent", "UpClaw/0.1.0")),
+        )
+        if not r.ok:
+            continue
+        body = r.body or ""
+        if "__schema" in body and "types" in body:
+            name = re.search(r'"name"\s*:\s*"([^"]+)"', body)
+            store.add(
+                title="GraphQL Introspection 泄露",
+                severity="HIGH",
+                status="VERIFIED",
+                category="graphql",
+                target=url,
+                location=test,
+                description="GraphQL 端点开启了 introspection，攻击者可枚举全部类型/字段/"
+                            "查询/变更定义，快速定位可利用接口。",
+                evidence=f"POST {test}\nquery: {query}\n回显含 __schema（首个类型: "
+                         f"{name.group(1) if name else '未知'}）",
+                request=f"POST {test}\nContent-Type: application/json\n\n{payload}",
+                impact="完整 schema 泄露暴露业务对象结构与内部字段名，显著降低后续"
+                       "越权/信息泄露漏洞的挖掘成本。",
+                remediation="生产环境关闭 introspection（如 Apollo: ApolloServerPluginLandingPageDisabled "
+                            "＋ 网关层拦截 __schema 查询）。",
+                references=["https://owasp.org/www-project-api-security/"],
+                cvss=7.5,
+            )
+            return
+
+
+# ---- v0.6 新模块注册 ----
+_V06_MODULES: dict[str, Callable[[FindingStore, str, dict[str, Any]], None]] = {
+    "takeover": _run_takeover,
+    "js-secrets": _run_js_secrets,
+    "graphql": _run_graphql,
+}
+for _n, _f in _V06_MODULES.items():
+    AVAILABLE[_n] = _f
+DEFAULT_CHECKS = ",".join(AVAILABLE)
+del _V06_MODULES, _n, _f
+
+
 def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     started = time.time()
     raw_targets = [t.strip() for t in args.target.split(",") if t.strip()]
@@ -4429,6 +4842,11 @@ def cmd_scan(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
     # ---- 外部工具适配（v0.3，自动检测本机已装工具）----
     if not getattr(args, "no_ext", False):
+        # v0.6: nuclei 定向扫描参数透传
+        for _k in ("ext_nuclei_tags", "ext_nuclei_severity", "ext_nuclei_template"):
+            _av = getattr(args, _k.replace("ext_nuclei_", "nuclei_"), None)
+            if _av:
+                cfg[_k] = _av
         run_external_phase(store, url, cfg, args)
 
     # ---- 输出 ----
@@ -4557,7 +4975,7 @@ def cmd_tools(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         path = info["path"] if info["installed"] else "-"
         print(f"  {disp:<16}{cat:<18}{st:<12}{path[:40]}")
     print("\n说明:")
-    print("  · 可自动执行的工具（nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/zap/wpscan/commix/hydra/masscan/gobuster/arjun）")
+    print("  · 可自动执行的工具（nuclei/nmap/sqlmap/nikto/ffuf/dirsearch/subfinder/httpx/zap/wpscan/commix/hydra/masscan/gobuster/arjun/gau）")
     print("    在 scan 时被自动调用，结果统一进入 UpClaw 报告；")
     print("    可用 --no-ext 关闭，--ext-tools nuclei,sqlmap 只启用指定工具。")
     print("  · Yakit/BeEF/Burp Suite/AppScan/ARL 为 GUI/API 类工具，请按其文档人工驱动。")
@@ -4596,6 +5014,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-ext", action="store_true",
                    help="关闭外部工具适配阶段（默认自动调用已安装的外部工具）")
     s.add_argument("--ext-tools", help="仅启用指定外部工具，逗号分隔，如 nuclei,sqlmap")
+    s.add_argument("--nuclei-tags", help="Nuclei 定向标签，逗号分隔，如 cve,wordpress（按指纹定向扫描）")
+    s.add_argument("--nuclei-severity", help="Nuclei 最低严重级过滤，如 high,critical")
+    s.add_argument("--nuclei-template", help="Nuclei 指定模板文件/目录")
     s.add_argument("--ports", help="端口列表，如 80,443 或 1-1000")
     s.add_argument("--skip-ports", action="store_true", help="跳过端口扫描")
     s.add_argument("--port-timeout", type=float, default=1.5, help="端口连接超时")
